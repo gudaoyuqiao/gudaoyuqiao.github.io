@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /Users/dingqiuyi/Documents/git_projects/claude_local/personal_website/.claude)",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}
