@@ -6,7 +6,7 @@ import {
 import {
   getFirestore, collection, doc, query, where, orderBy, limit,
   getDocs, getDoc, addDoc, updateDoc, deleteDoc, setDoc,
-  serverTimestamp, Timestamp
+  serverTimestamp, Timestamp, arrayUnion, arrayRemove
 } from 'https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js';
 
 // ─── Firebase init ────────────────────────────────────────────────
@@ -170,6 +170,67 @@ const Store = {
   async remove(id) {
     if (!currentUser) throw new Error('请先登录');
     await deleteDoc(doc(db, 'articles', id));
+  },
+};
+
+// ─── Comments (Firestore subcollection per article) ───────────────
+const Comments = {
+  colRef(articleId) {
+    return collection(db, 'articles', articleId, 'comments');
+  },
+  docRef(articleId, commentId) {
+    return doc(db, 'articles', articleId, 'comments', commentId);
+  },
+
+  async list(articleId) {
+    try {
+      const snap = await getDocs(this.colRef(articleId));
+      const items = snap.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          content:    data.content || '',
+          authorUid:  data.authorUid || '',
+          authorName: data.authorName || '匿名',
+          authorPhoto:data.authorPhoto || '',
+          parentId:   data.parentId || null,
+          likedBy:    data.likedBy || [],
+          createdAt:  data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : new Date().toISOString(),
+        };
+      });
+      return items.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    } catch (e) {
+      console.error('comments list failed', e);
+      return [];
+    }
+  },
+
+  async create(articleId, { content, parentId = null }) {
+    if (!currentUser) throw new Error('请先登录');
+    const provider = currentUser.providerData[0] || {};
+    const data = {
+      content: content.trim(),
+      authorUid: currentUser.uid,
+      authorName: provider.displayName || currentUser.displayName || 'GitHub user',
+      authorPhoto: currentUser.photoURL || '',
+      parentId: parentId || null,
+      likedBy: [],
+      createdAt: serverTimestamp(),
+    };
+    const r = await addDoc(this.colRef(articleId), data);
+    return r.id;
+  },
+
+  async remove(articleId, commentId) {
+    if (!currentUser) throw new Error('请先登录');
+    await deleteDoc(this.docRef(articleId, commentId));
+  },
+
+  async toggleLike(articleId, commentId, currentlyLiked) {
+    if (!currentUser) throw new Error('请先登录');
+    await updateDoc(this.docRef(articleId, commentId), {
+      likedBy: currentlyLiked ? arrayRemove(currentUser.uid) : arrayUnion(currentUser.uid),
+    });
   },
 };
 
@@ -439,8 +500,212 @@ async function viewArticle(id) {
         </header>
         <div class="art-body">${a.content}</div>
       </article>
+
+      <section class="comments-section" id="comments-section">
+        <div class="loading">加载评论中…</div>
+      </section>
+    </div>`;
+
+  // Load comments asynchronously without blocking article render
+  refreshComments(a.id, a.authorUid);
+}
+
+// ─── Comments rendering ───────────────────────────────────────────
+function relTime(iso) {
+  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60)    return '刚刚';
+  const min = Math.floor(sec / 60);
+  if (min < 60)    return `${min} 分钟前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24)   return `${hour} 小时前`;
+  const day = Math.floor(hour / 24);
+  if (day < 7)     return `${day} 天前`;
+  return fmtDate(iso);
+}
+
+function avatarHtml(c) {
+  if (c.authorPhoto) {
+    return `<div class="comment-avatar"><img src="${esc(c.authorPhoto)}" alt=""></div>`;
+  }
+  const initial = (c.authorName || '?').trim().charAt(0).toUpperCase();
+  return `<div class="comment-avatar">${esc(initial)}</div>`;
+}
+
+function renderCommentContent(content) {
+  // Highlight @username mentions
+  return esc(content).replace(/@(\S+)/g, '<span class="comment-mention">@$1</span>');
+}
+
+function commentActionsHtml(articleId, c, authorOfArticle) {
+  const liked = currentUser && c.likedBy.includes(currentUser.uid);
+  const likeCount = c.likedBy.length;
+  const heart = liked
+    ? `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 21s-7-4.5-9.5-9C0 7 4 3 8 5c1.6.8 2.5 2.3 4 4 1.5-1.7 2.4-3.2 4-4 4-2 8 2 5.5 7-2.5 4.5-9.5 9-9.5 9z"/></svg>`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-4.5-9.5-9C0 7 4 3 8 5c1.6.8 2.5 2.3 4 4 1.5-1.7 2.4-3.2 4-4 4-2 8 2 5.5 7-2.5 4.5-9.5 9-9.5 9z"/></svg>`;
+
+  const canDelete = currentUser && (currentUser.uid === c.authorUid || isOwner());
+  const canReply = currentUser != null;
+
+  return `
+    <div class="comment-actions">
+      <button class="like-btn ${liked ? 'liked' : ''}"
+              onclick="window.cmtToggleLike('${articleId}','${c.id}',${liked})"
+              ${!currentUser ? 'title="登录后才能点赞"' : ''}>
+        ${heart}${likeCount > 0 ? `<span>${likeCount}</span>` : ''}
+      </button>
+      ${canReply
+        ? `<button onclick="window.cmtShowReply('${articleId}','${c.id}','${esc(c.authorName)}')">回复</button>`
+        : ''}
+      ${canDelete
+        ? `<button onclick="window.cmtDelete('${articleId}','${c.id}')">删除</button>`
+        : ''}
     </div>`;
 }
+
+function renderComment(articleId, c, articleAuthorUid, isReply = false) {
+  const isArticleAuthor = c.authorUid === articleAuthorUid;
+  return `
+    <li class="comment ${isReply ? 'reply' : ''}">
+      ${avatarHtml(c)}
+      <div class="comment-body">
+        <div class="comment-header">
+          <span class="comment-author ${isArticleAuthor ? 'owner-badge' : ''}">${esc(c.authorName)}</span>
+          <span class="comment-time">${relTime(c.createdAt)}</span>
+        </div>
+        <div class="comment-content">${renderCommentContent(c.content)}</div>
+        ${commentActionsHtml(articleId, c, articleAuthorUid)}
+        <div id="reply-form-${c.id}"></div>
+      </div>
+    </li>`;
+}
+
+async function refreshComments(articleId, articleAuthorUid) {
+  const container = document.getElementById('comments-section');
+  if (!container) return;
+
+  const all = await Comments.list(articleId);
+  const topLevel = all.filter(c => !c.parentId);
+  const repliesByParent = new Map();
+  all.forEach(c => {
+    if (c.parentId) {
+      if (!repliesByParent.has(c.parentId)) repliesByParent.set(c.parentId, []);
+      repliesByParent.get(c.parentId).push(c);
+    }
+  });
+
+  const formHtml = currentUser
+    ? `<div class="comment-form" id="top-comment-form">
+         ${avatarHtml({ authorName: currentUser.displayName || 'You', authorPhoto: currentUser.photoURL || '' })}
+         <div class="comment-form-body">
+           <textarea id="top-comment-text" placeholder="写下你的想法…" rows="3"></textarea>
+           <div class="comment-form-actions">
+             <button class="btn btn-primary" onclick="window.cmtSubmit('${articleId}', '${articleAuthorUid}', null)">发表评论</button>
+           </div>
+         </div>
+       </div>`
+    : `<div class="comments-prompt">
+         用 GitHub 账号登录后可以参与讨论
+         <button onclick="window.loginWithGithub()">立即登录</button>
+       </div>`;
+
+  const listHtml = topLevel.length
+    ? `<ul class="comment-list">
+         ${topLevel.map(c => {
+           const replies = repliesByParent.get(c.id) || [];
+           const repliesHtml = replies.length
+             ? `<ul class="reply-list">
+                  ${replies.map(r => renderComment(articleId, r, articleAuthorUid, true)).join('')}
+                </ul>`
+             : '';
+           const main = renderComment(articleId, c, articleAuthorUid, false);
+           // Insert replies before closing </li>
+           return main.replace('</li>', `${repliesHtml}</li>`);
+         }).join('')}
+       </ul>`
+    : `<div class="comments-empty">还没有评论，来当第一个</div>`;
+
+  container.innerHTML = `
+    <h2 class="comments-heading">评论 ${all.length ? `(${all.length})` : ''}</h2>
+    ${formHtml}
+    ${listHtml}`;
+}
+
+// Comment action handlers
+async function cmtSubmit(articleId, articleAuthorUid, parentId) {
+  const textarea = parentId
+    ? document.getElementById(`reply-text-${parentId}`)
+    : document.getElementById('top-comment-text');
+  if (!textarea) return;
+  const content = textarea.value.trim();
+  if (!content) { textarea.focus(); return; }
+
+  textarea.disabled = true;
+  try {
+    await Comments.create(articleId, { content, parentId });
+    await refreshComments(articleId, articleAuthorUid);
+  } catch (e) {
+    alert('发表失败：' + e.message);
+    textarea.disabled = false;
+  }
+}
+
+async function cmtToggleLike(articleId, commentId, currentlyLiked) {
+  if (!currentUser) { go('/settings'); return; }
+  try {
+    await Comments.toggleLike(articleId, commentId, currentlyLiked);
+    // Get article authorUid from current view by refetching
+    const article = await Store.get(articleId);
+    await refreshComments(articleId, article?.authorUid || '');
+  } catch (e) {
+    alert('点赞失败：' + e.message);
+  }
+}
+
+async function cmtDelete(articleId, commentId) {
+  if (!confirm('确定要删除这条评论吗？')) return;
+  try {
+    await Comments.remove(articleId, commentId);
+    const article = await Store.get(articleId);
+    await refreshComments(articleId, article?.authorUid || '');
+  } catch (e) {
+    alert('删除失败：' + e.message);
+  }
+}
+
+function cmtShowReply(articleId, parentId, parentAuthor) {
+  if (!currentUser) { go('/settings'); return; }
+  const slot = document.getElementById(`reply-form-${parentId}`);
+  if (!slot) return;
+  if (slot.querySelector('textarea')) {
+    // Already open; just focus
+    slot.querySelector('textarea').focus();
+    return;
+  }
+  slot.innerHTML = `
+    <div class="inline-reply-form">
+      <textarea id="reply-text-${parentId}" placeholder="@${esc(parentAuthor)} " rows="2">@${esc(parentAuthor)} </textarea>
+      <div class="inline-reply-form-actions">
+        <button class="btn btn-ghost" onclick="window.cmtCancelReply('${parentId}')">取消</button>
+        <button class="btn btn-primary" onclick="window.cmtSubmit('${articleId}', '', '${parentId}')">回复</button>
+      </div>
+    </div>`;
+  const ta = document.getElementById(`reply-text-${parentId}`);
+  ta.focus();
+  // place cursor at end
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+function cmtCancelReply(parentId) {
+  const slot = document.getElementById(`reply-form-${parentId}`);
+  if (slot) slot.innerHTML = '';
+}
+
+window.cmtSubmit = cmtSubmit;
+window.cmtToggleLike = cmtToggleLike;
+window.cmtDelete = cmtDelete;
+window.cmtShowReply = cmtShowReply;
+window.cmtCancelReply = cmtCancelReply;
 
 async function deleteArt(id) {
   if (!confirm('确定要删除这篇文章吗？此操作无法撤销。')) return;
