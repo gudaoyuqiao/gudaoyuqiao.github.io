@@ -1,310 +1,238 @@
-'use strict';
+// ─── Firebase imports ─────────────────────────────────────────────
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js';
+import {
+  getAuth, signInWithPopup, GithubAuthProvider, signOut, onAuthStateChanged
+} from 'https://www.gstatic.com/firebasejs/10.14.0/firebase-auth.js';
+import {
+  getFirestore, collection, doc, query, where, orderBy, limit,
+  getDocs, getDoc, addDoc, updateDoc, deleteDoc, setDoc,
+  serverTimestamp, Timestamp
+} from 'https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js';
 
-// ─── Site Config (auto-detect + override) ─────────────────────────
-const Config = {
-  get title()    { return localStorage.getItem('blog_title')    || 'My Blog'; },
-  get subtitle() { return localStorage.getItem('blog_subtitle') || '记录思考，分享生活'; },
-  get about()    { return localStorage.getItem('blog_about')    || DEFAULT_ABOUT; },
-  setAbout(v)    { localStorage.setItem('blog_about', v); },
-
-  get token()    { return localStorage.getItem('gh_token') || ''; },
-  set token(v)   { v ? localStorage.setItem('gh_token', v) : localStorage.removeItem('gh_token'); },
-  get owner() {
-    const stored = localStorage.getItem('gh_owner');
-    if (stored) return stored;
-    const host = location.hostname;
-    if (host.endsWith('.github.io')) return host.split('.')[0];
-    return '';
-  },
-  set owner(v) { v ? localStorage.setItem('gh_owner', v) : localStorage.removeItem('gh_owner'); },
-  get repo() {
-    const stored = localStorage.getItem('gh_repo');
-    if (stored) return stored;
-    const host = location.hostname;
-    if (host.endsWith('.github.io')) return host;
-    return '';
-  },
-  set repo(v)  { v ? localStorage.setItem('gh_repo', v) : localStorage.removeItem('gh_repo'); },
-  get isOwner() { return !!this.token; },
-
-  get passphrase() { return localStorage.getItem('blog_passphrase') || ''; },
-  set passphrase(v) { v ? localStorage.setItem('blog_passphrase', v) : localStorage.removeItem('blog_passphrase'); },
+// ─── Firebase init ────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyA9_hLxZ1cRuPqkUyq0V6337Fo8zbMAA-Q",
+  authDomain: "gudaoyuqiao-blog.firebaseapp.com",
+  projectId: "gudaoyuqiao-blog",
+  storageBucket: "gudaoyuqiao-blog.firebasestorage.app",
+  messagingSenderId: "216006140355",
+  appId: "1:216006140355:web:0eac5d2235b7d2e9691d76"
 };
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = getFirestore(fbApp);
+const githubProvider = new GithubAuthProvider();
 
-// ─── Crypto (Web Crypto API, AES-256-GCM) ─────────────────────────
-const Crypto = {
-  async deriveKey(passphrase, salt) {
-    const enc = new TextEncoder();
-    const baseKey = await crypto.subtle.importKey(
-      'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-    return crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' },
-      baseKey,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']);
-  },
-  async encrypt(plaintext, passphrase) {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const iv   = crypto.getRandomValues(new Uint8Array(12));
-    const key  = await this.deriveKey(passphrase, salt);
-    const ct   = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
-    return { v: 1, salt: b64encode(salt), iv: b64encode(iv), ct: b64encode(new Uint8Array(ct)) };
-  },
-  async decrypt(payload, passphrase) {
-    const salt = b64decode(payload.salt);
-    const iv   = b64decode(payload.iv);
-    const ct   = b64decode(payload.ct);
-    const key  = await this.deriveKey(passphrase, salt);
-    const pt   = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
-    return new TextDecoder().decode(pt);
-  },
-};
-
-function b64encode(bytes) {
-  let s = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  }
-  return btoa(s);
-}
-function b64decode(s) {
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-const DEFAULT_ABOUT = `<h2>关于我</h2>
+// ─── Site Config ──────────────────────────────────────────────────
+const SITE = {
+  title: 'My Blog',
+  subtitle: '记录思考，分享生活',
+  about: `<h2>关于我</h2>
 <p>你好，欢迎来到我的小角落。</p>
 <p>这里记录了我的思考、阅读和生活片段。如果你也喜欢慢慢写、慢慢读，那我们或许会成为朋友。</p>
 <h3>关于本站</h3>
-<p>这是一个用 HTML / CSS / JavaScript 构建的极简博客，公开文章保存在 GitHub 仓库里。</p>
-<blockquote>真正重要的事情，需要时间。</blockquote>`;
+<p>这是一个用 HTML / CSS / JavaScript 构建的极简博客，数据存在 Firebase，部署在 GitHub Pages。</p>
+<blockquote>真正重要的事情，需要时间。</blockquote>`,
+};
+const DEFAULT_ABOUT = SITE.about;
 
-// ─── Remote (GitHub) ──────────────────────────────────────────────
-const Remote = {
-  cachePublic: null,
-  cachePrivate: null,
-  publicLoaded: false,
-  privateLoaded: false,
+async function loadSiteSettings() {
+  try {
+    const d = await getDoc(doc(db, 'settings', 'site'));
+    if (d.exists()) {
+      const data = d.data();
+      if (data.title)    SITE.title    = data.title;
+      if (data.subtitle) SITE.subtitle = data.subtitle;
+      if (data.about)    SITE.about    = data.about;
+    }
+  } catch (e) { console.warn('site settings load failed', e); }
+}
 
-  async fetchPublic() {
+async function saveAboutToCloud(content) {
+  SITE.about = content;
+  await setDoc(doc(db, 'settings', 'site'), { about: content }, { merge: true });
+}
+
+// ─── Auth State ───────────────────────────────────────────────────
+let currentUser = null;
+let authReady = false;
+let pendingRoute = false;
+
+onAuthStateChanged(auth, async (user) => {
+  const wasSignedIn = !!currentUser;
+  currentUser = user;
+  authReady = true;
+  updateAuthUI();
+  if (user && !wasSignedIn) {
+    // Just signed in — try seeding empty DB
+    await seedIfEmpty();
+  }
+  if (pendingRoute) { pendingRoute = false; route(); }
+  else if (wasSignedIn !== !!user) route();
+});
+
+function updateAuthUI() {
+  const writeBtn = document.getElementById('write-btn');
+  if (writeBtn) writeBtn.hidden = !currentUser;
+}
+
+async function loginWithGithub() {
+  try {
+    await signInWithPopup(auth, githubProvider);
+  } catch (e) {
+    if (e.code === 'auth/popup-closed-by-user' ||
+        e.code === 'auth/cancelled-popup-request') return;
+    const msg = e.code === 'auth/unauthorized-domain'
+      ? '当前域名未加入 Firebase 授权域名列表。需要在 Firebase Console → Authentication → Settings → Authorized domains 里加入 ' + location.hostname
+      : (e.message || e.code);
+    alert('登录失败：' + msg);
+  }
+}
+
+async function logoutAction() {
+  if (!confirm('确定要登出吗？')) return;
+  await signOut(auth);
+  go('/');
+}
+
+// ─── Store (Firestore) ────────────────────────────────────────────
+function toArticle(d) {
+  const data = d.data();
+  const toIso = ts => ts?.toDate ? ts.toDate().toISOString() : (ts || new Date().toISOString());
+  return {
+    id: d.id,
+    title:      data.title || '',
+    content:    data.content || '',
+    tags:       data.tags || [],
+    visibility: data.visibility || 'public',
+    authorUid:  data.authorUid || '',
+    authorName: data.authorName || '',
+    createdAt:  toIso(data.createdAt),
+    updatedAt:  toIso(data.updatedAt),
+  };
+}
+
+const Store = {
+  async getAll() {
     try {
-      const res = await fetch('data/public.json?t=' + Date.now(), { cache: 'no-store' });
-      if (!res.ok) { this.cachePublic = []; this.publicLoaded = true; return []; }
-      const data = await res.json();
-      this.cachePublic = Array.isArray(data) ? data : [];
-      this.publicLoaded = true;
-      return this.cachePublic;
+      let q;
+      if (currentUser) {
+        q = query(collection(db, 'articles'), orderBy('createdAt', 'desc'));
+      } else {
+        q = query(collection(db, 'articles'),
+          where('visibility', '==', 'public'),
+          orderBy('createdAt', 'desc'));
+      }
+      const snap = await getDocs(q);
+      return snap.docs.map(toArticle);
     } catch (e) {
-      console.error('Failed to fetch public.json', e);
-      this.cachePublic = [];
-      this.publicLoaded = true;
+      console.error('getAll failed', e);
       return [];
     }
   },
 
-  async fetchPrivate() {
-    if (!Config.passphrase) { this.cachePrivate = []; this.privateLoaded = true; return []; }
-    try {
-      const res = await fetch('data/private.json?t=' + Date.now(), { cache: 'no-store' });
-      if (!res.ok) { this.cachePrivate = []; this.privateLoaded = true; return []; }
-      const encrypted = await res.json();
-      const json = await Crypto.decrypt(encrypted, Config.passphrase);
-      const data = JSON.parse(json);
-      this.cachePrivate = Array.isArray(data) ? data : [];
-      this.privateLoaded = true;
-      return this.cachePrivate;
-    } catch (e) {
-      console.error('Failed to decrypt private.json', e);
-      this.cachePrivate = [];
-      this.privateLoaded = true;
-      throw new Error('私密文章解密失败，可能是密码不对或文件损坏');
-    }
-  },
-
-  async commitFile(path, contentString, message) {
-    if (!Config.token) throw new Error('请先在「设置」里配置 GitHub Token');
-    if (!Config.owner || !Config.repo) throw new Error('请先在「设置」里配置仓库信息');
-
-    const apiUrl = `https://api.github.com/repos/${Config.owner}/${Config.repo}/contents/${path}`;
-
-    let sha = null;
-    try {
-      const r = await fetch(apiUrl, { headers: this.headers() });
-      if (r.ok) sha = (await r.json()).sha;
-      else if (r.status !== 404) {
-        const t = await r.text();
-        throw new Error(`读取 ${path} 失败：${r.status} ${t.slice(0, 200)}`);
-      }
-    } catch (e) {
-      if (e.message.includes('失败')) throw e;
-    }
-
-    const content = btoa(unescape(encodeURIComponent(contentString)));
-    const body = { message, content };
-    if (sha) body.sha = sha;
-
-    const r2 = await fetch(apiUrl, {
-      method: 'PUT',
-      headers: { ...this.headers(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!r2.ok) {
-      let hint = '';
-      if (r2.status === 401) hint = ' Token 无效或已过期。';
-      else if (r2.status === 403) hint = ' Token 权限不足，需要 Contents: read/write 权限。';
-      else if (r2.status === 404) hint = ' 仓库或路径不存在，检查仓库名。';
-      throw new Error(`GitHub 推送失败：${r2.status}.${hint}`);
-    }
-    return r2.json();
-  },
-
-  async commitPublic(articles) {
-    const sorted = [...articles].sort((a, b) =>
-      new Date(b.createdAt) - new Date(a.createdAt));
-    const json = JSON.stringify(sorted, null, 2);
-    await this.commitFile('data/public.json', json, `Update public articles (${sorted.length})`);
-    this.cachePublic = sorted;
-  },
-
-  async commitPrivate(articles) {
-    if (!Config.passphrase) throw new Error('请在「设置」里配置私密文章密码');
-    const sorted = [...articles].sort((a, b) =>
-      new Date(b.createdAt) - new Date(a.createdAt));
-    const encrypted = await Crypto.encrypt(JSON.stringify(sorted), Config.passphrase);
-    const json = JSON.stringify(encrypted, null, 2);
-    await this.commitFile('data/private.json', json, `Update private articles (${sorted.length})`);
-    this.cachePrivate = sorted;
-  },
-
-  headers() {
-    return {
-      'Accept': 'application/vnd.github+json',
-      'Authorization': `Bearer ${Config.token}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-    };
-  },
-};
-
-// ─── Store (local + remote merge) ─────────────────────────────────
-const Store = {
-  getLocal() {
-    try { return JSON.parse(localStorage.getItem('blog_articles') || '[]'); }
-    catch { return []; }
-  },
-
-  saveLocal(articles) { localStorage.setItem('blog_articles', JSON.stringify(articles)); },
-
-  // Sync remote (public + decrypted private) → local for owner
-  async syncRemoteIntoLocal() {
-    if (!Config.isOwner) return;
-
-    const remoteList = [];
-
-    if (!Remote.publicLoaded) await Remote.fetchPublic();
-    (Remote.cachePublic || []).forEach(a => remoteList.push({ ...a, visibility: 'public' }));
-
-    if (Config.passphrase) {
-      try {
-        if (!Remote.privateLoaded) await Remote.fetchPrivate();
-        (Remote.cachePrivate || []).forEach(a => remoteList.push({ ...a, visibility: 'private' }));
-      } catch (e) {
-        // Decryption failed; surface via banner but don't block other articles
-        console.warn(e.message);
-        window.__lastSyncError = e.message;
-      }
-    }
-
-    const local = this.getLocal();
-    const byId = new Map(local.map(a => [a.id, a]));
-    let changed = false;
-    remoteList.forEach(r => {
-      const existing = byId.get(r.id);
-      if (!existing) {
-        local.push(r);
-        byId.set(r.id, r);
-        changed = true;
-      } else if (new Date(r.updatedAt) > new Date(existing.updatedAt)) {
-        Object.assign(existing, r);
-        changed = true;
-      }
-    });
-    if (changed) this.saveLocal(local);
-  },
-
-  async getAll() {
-    if (!Remote.publicLoaded) await Remote.fetchPublic();
-
-    if (Config.isOwner) {
-      await this.syncRemoteIntoLocal();
-      const local = this.getLocal();
-      local.forEach(a => { if (!a.visibility) a.visibility = 'private'; });
-      return [...local].sort((a, b) =>
-        new Date(b.createdAt) - new Date(a.createdAt));
-    }
-
-    return [...(Remote.cachePublic || [])].sort((a, b) =>
-      new Date(b.createdAt) - new Date(a.createdAt));
-  },
-
   async get(id) {
-    const all = await this.getAll();
-    return all.find(a => a.id === id) || null;
+    try {
+      const d = await getDoc(doc(db, 'articles', id));
+      return d.exists() ? toArticle(d) : null;
+    } catch (e) { console.error(e); return null; }
   },
 
-  async upsert(article) {
-    const local = this.getLocal();
-    const prev = local.find(a => a.id === article.id);
-    const wasPublic  = prev && prev.visibility === 'public';
-    const wasPrivate = prev && prev.visibility === 'private';
+  async create(a) {
+    if (!currentUser) throw new Error('请先登录');
+    const data = {
+      title:      a.title,
+      content:    a.content,
+      tags:       a.tags || [],
+      visibility: a.visibility || 'public',
+      authorUid:  currentUser.uid,
+      authorName: currentUser.displayName || currentUser.providerData[0]?.displayName || 'Owner',
+      createdAt:  serverTimestamp(),
+      updatedAt:  serverTimestamp(),
+    };
+    const r = await addDoc(collection(db, 'articles'), data);
+    return r.id;
+  },
 
-    const i = local.findIndex(a => a.id === article.id);
-    if (i >= 0) local[i] = article;
-    else local.unshift(article);
-    this.saveLocal(local);
-
-    if (!Config.isOwner) return;
-    const isPublic  = article.visibility === 'public';
-    const isPrivate = article.visibility === 'private';
-
-    if (wasPublic || isPublic) await this.syncPublic();
-    if ((wasPrivate || isPrivate) && Config.passphrase) await this.syncPrivate();
+  async update(id, a) {
+    if (!currentUser) throw new Error('请先登录');
+    await updateDoc(doc(db, 'articles', id), {
+      title:      a.title,
+      content:    a.content,
+      tags:       a.tags || [],
+      visibility: a.visibility || 'public',
+      updatedAt:  serverTimestamp(),
+    });
   },
 
   async remove(id) {
-    const local = this.getLocal();
-    const target = local.find(a => a.id === id);
-    const wasPublic  = target && target.visibility === 'public';
-    const wasPrivate = target && target.visibility === 'private';
-
-    this.saveLocal(local.filter(a => a.id !== id));
-
-    if (!Config.isOwner) return;
-    if (wasPublic) await this.syncPublic();
-    if (wasPrivate && Config.passphrase) await this.syncPrivate();
-  },
-
-  async syncPublic() {
-    const publics = this.getLocal().filter(a => a.visibility === 'public');
-    await Remote.commitPublic(publics);
-  },
-
-  async syncPrivate() {
-    const privates = this.getLocal().filter(a => a.visibility === 'private');
-    await Remote.commitPrivate(privates);
+    if (!currentUser) throw new Error('请先登录');
+    await deleteDoc(doc(db, 'articles', id));
   },
 };
 
-// ─── Utilities ────────────────────────────────────────────────────
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+// ─── Sample seed for first-time owner ─────────────────────────────
+async function seedIfEmpty() {
+  if (!currentUser) return;
+  try {
+    const snap = await getDocs(query(collection(db, 'articles'), limit(1)));
+    if (!snap.empty) return;
+  } catch { return; }
+
+  const now = Date.now();
+  const days = n => Timestamp.fromDate(new Date(now - n * 86400000));
+  const seeds = [
+    {
+      title: '欢迎来到我的博客',
+      content: `<p>这是我的个人博客，用 HTML / CSS / JavaScript 构建，账号系统和数据存在 Firebase，部署在 GitHub Pages 上。</p>
+<h2>它能做什么</h2>
+<ul>
+<li>用网页内的富文本编辑器直接写文章</li>
+<li>顶部菜单可以快速跳转到归档、标签、关于</li>
+<li>右上角的搜索按钮可以全文搜索</li>
+<li>每篇文章可以设为公开或仅自己可见</li>
+<li>用 GitHub 账号登录后才能写作</li>
+</ul>
+<blockquote>公开文章对所有访客可见，私密文章只有你登录后能看到。</blockquote>`,
+      tags: ['指南', '介绍'],
+      daysAgo: 0,
+    },
+    {
+      title: '为什么我开始写博客',
+      content: `<p>很多人写博客是为了被看见，而我写博客是为了把自己看清楚。</p>
+<p>当一个想法只在脑子里翻滚时，它常常是模糊的、自我感觉良好的；但当你尝试把它写下来时，逻辑里的洞、表达上的笨拙、情绪里的躲闪，会一个个被照出来。</p>
+<h2>写作是诚实的工具</h2>
+<p>你不可能糊弄文字。你可以糊弄聊天，可以糊弄会议，但写作要求你把每个词都安放到位。这种安放本身就是一次思想的整理。</p>
+<blockquote>我手写我心，心也因此越来越清晰。</blockquote>`,
+      tags: ['随笔', '写作'],
+      daysAgo: 3,
+    },
+    {
+      title: '关于慢的力量',
+      content: `<p>这是一个崇拜速度的时代。两倍速听播客，三天读一本书，五分钟看完一部电影。</p>
+<p>但有些东西无法被加速：信任、理解、爱、深度的快乐。它们只能慢慢生长。</p>
+<h2>慢不是落后</h2>
+<p>慢是一种主动的选择。是当所有人都在抢答时，你愿意先听完问题。</p>`,
+      tags: ['随笔', '思考'],
+      daysAgo: 10,
+    },
+  ];
+
+  for (const s of seeds) {
+    try {
+      await addDoc(collection(db, 'articles'), {
+        title: s.title, content: s.content, tags: s.tags,
+        visibility: 'public',
+        authorUid: currentUser.uid,
+        authorName: currentUser.displayName || 'Owner',
+        createdAt: days(s.daysAgo),
+        updatedAt: days(s.daysAgo),
+      });
+    } catch (e) { console.warn('seed item failed', e); }
+  }
 }
 
+// ─── Utilities ────────────────────────────────────────────────────
 function fmtDate(iso, short = false) {
   const d = new Date(iso);
   return short
@@ -350,35 +278,37 @@ function lockBadge(visibility) {
     : '';
 }
 
+function canEdit(article) {
+  return currentUser && article.authorUid === currentUser.uid;
+}
+
 // ─── Router ───────────────────────────────────────────────────────
 function go(path) { window.location.hash = '#' + path; }
+window.go = go;
 
 const ROUTES = [
-  [/^\/$/,                       () => viewHome()],
-  [/^\/article\/([^/]+)$/,       m => viewArticle(m[1])],
-  [/^\/editor$/,                 () => viewEditor(null)],
-  [/^\/editor\/([^/]+)$/,        m => viewEditor(m[1])],
-  [/^\/archive$/,                () => viewArchive()],
-  [/^\/tags$/,                   () => viewTags()],
-  [/^\/tag\/(.+)$/,              m => viewTag(decodeURIComponent(m[1]))],
-  [/^\/about$/,                  () => viewAbout()],
-  [/^\/settings$/,               () => viewSettings()],
+  [/^\/$/,                  () => viewHome()],
+  [/^\/article\/([^/]+)$/,  m => viewArticle(m[1])],
+  [/^\/editor$/,            () => viewEditor(null)],
+  [/^\/editor\/([^/]+)$/,   m => viewEditor(m[1])],
+  [/^\/archive$/,           () => viewArchive()],
+  [/^\/tags$/,              () => viewTags()],
+  [/^\/tag\/(.+)$/,         m => viewTag(decodeURIComponent(m[1]))],
+  [/^\/about$/,             () => viewAbout()],
+  [/^\/settings$/,          () => viewSettings()],
 ];
 
 async function route() {
+  if (!authReady) { pendingRoute = true; return; }
   const path = window.location.hash.replace(/^#/, '') || '/';
   syncNavActive(path);
-  syncOwnerUI();
-
-  // Show loading while routing async views
+  updateAuthUI();
   const app = document.getElementById('app');
   for (const [rx, fn] of ROUTES) {
     const m = path.match(rx);
     if (m) {
       try {
-        if (!Remote.publicLoaded) {
-          app.innerHTML = `<div class="loading">加载中…</div>`;
-        }
+        app.innerHTML = `<div class="loading">加载中…</div>`;
         await fn(m);
       } catch (err) {
         console.error(err);
@@ -393,8 +323,7 @@ async function route() {
       return;
     }
   }
-  app.innerHTML =
-    `<div class="error-page"><h2>页面不存在</h2><a href="#/">← 返回首页</a></div>`;
+  app.innerHTML = `<div class="error-page"><h2>页面不存在</h2><a href="#/">← 返回首页</a></div>`;
 }
 
 function syncNavActive(path) {
@@ -409,32 +338,28 @@ function syncNavActive(path) {
   });
 }
 
-function syncOwnerUI() {
-  const writeBtn = document.getElementById('write-btn');
-  if (writeBtn) writeBtn.hidden = !Config.isOwner;
-}
-
 window.addEventListener('hashchange', route);
 window.addEventListener('load', async () => {
-  document.getElementById('nav-brand').textContent = Config.title;
-  document.getElementById('footer-brand').textContent = Config.title;
+  document.getElementById('nav-brand').textContent = SITE.title;
+  document.getElementById('footer-brand').textContent = SITE.title;
   initSearch();
   initKeyboard();
-  // Pre-fetch public articles so search and routing have data
-  await Remote.fetchPublic();
-  await route();
+  await loadSiteSettings();
+  document.getElementById('nav-brand').textContent = SITE.title;
+  document.getElementById('footer-brand').textContent = SITE.title;
+  if (authReady) route();
 });
 
 // ─── View: Home ───────────────────────────────────────────────────
 async function viewHome() {
-  document.title = Config.title;
+  document.title = SITE.title;
   const articles = await Store.getAll();
   const app = document.getElementById('app');
 
   const hero = `
     <div class="hero">
-      <h1 class="hero-title">${esc(Config.title)}</h1>
-      <p class="hero-subtitle">${esc(Config.subtitle)}</p>
+      <h1 class="hero-title">${esc(SITE.title)}</h1>
+      <p class="hero-subtitle">${esc(SITE.subtitle)}</p>
     </div>`;
 
   if (!articles.length) {
@@ -443,10 +368,8 @@ async function viewHome() {
         ${hero}
         <div class="empty-state">
           <div class="empty-icon">✒</div>
-          <p>${Config.isOwner ? '还没有文章，来写第一篇吧' : '博主还没有发布任何文章'}</p>
-          ${Config.isOwner
-            ? `<a href="#/editor" class="btn btn-primary btn-lg">写第一篇文章</a>`
-            : ''}
+          <p>${currentUser ? '还没有文章，来写第一篇吧' : '博主还没有发布任何文章'}</p>
+          ${currentUser ? `<a href="#/editor" class="btn btn-primary btn-lg">写第一篇文章</a>` : ''}
         </div>
       </div>`;
     return;
@@ -469,11 +392,7 @@ async function viewHome() {
       </div>
     </article>`).join('');
 
-  app.innerHTML = `
-    <div class="page-home">
-      ${hero}
-      <div class="article-list">${cards}</div>
-    </div>`;
+  app.innerHTML = `<div class="page-home">${hero}<div class="article-list">${cards}</div></div>`;
 }
 
 // ─── View: Article ────────────────────────────────────────────────
@@ -486,12 +405,12 @@ async function viewArticle(id) {
     return;
   }
 
-  document.title = `${a.title} — ${Config.title}`;
+  document.title = `${a.title} — ${SITE.title}`;
 
-  const ownerActions = Config.isOwner ? `
+  const ownerActions = canEdit(a) ? `
     <div class="article-btns">
       <button class="btn btn-ghost" onclick="go('/editor/${a.id}')">编辑</button>
-      <button class="btn btn-ghost btn-danger" onclick="deleteArt('${a.id}')">删除</button>
+      <button class="btn btn-ghost btn-danger" onclick="window.deleteArt('${a.id}')">删除</button>
     </div>` : `<div></div>`;
 
   app.innerHTML = `
@@ -523,25 +442,20 @@ async function viewArticle(id) {
 
 async function deleteArt(id) {
   if (!confirm('确定要删除这篇文章吗？此操作无法撤销。')) return;
-  const target = (await Store.getAll()).find(a => a.id === id);
-  const willPushRemote = target && target.visibility === 'public';
-
   try {
-    if (willPushRemote) {
-      // Show in-page loading by replacing the article view
-      document.getElementById('app').innerHTML = `<div class="loading">正在从 GitHub 删除…</div>`;
-    }
+    document.getElementById('app').innerHTML = `<div class="loading">删除中…</div>`;
     await Store.remove(id);
     go('/');
-  } catch (err) {
-    alert('删除失败：' + (err.message || err));
+  } catch (e) {
+    alert('删除失败：' + e.message);
     route();
   }
 }
+window.deleteArt = deleteArt;
 
 // ─── View: Archive ────────────────────────────────────────────────
 async function viewArchive() {
-  document.title = `归档 — ${Config.title}`;
+  document.title = `归档 — ${SITE.title}`;
   const app = document.getElementById('app');
   const articles = (await Store.getAll()).sort(
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -581,7 +495,7 @@ async function viewArchive() {
 
 // ─── View: Tags ───────────────────────────────────────────────────
 async function viewTags() {
-  document.title = `标签 — ${Config.title}`;
+  document.title = `标签 — ${SITE.title}`;
   const app = document.getElementById('app');
   const tags = await allTagsWithCount();
 
@@ -606,9 +520,9 @@ async function viewTags() {
     </div>`;
 }
 
-// ─── View: Tag (filtered) ─────────────────────────────────────────
+// ─── View: Tag ────────────────────────────────────────────────────
 async function viewTag(tag) {
-  document.title = `${tag} — ${Config.title}`;
+  document.title = `${tag} — ${SITE.title}`;
   const app = document.getElementById('app');
   const articles = (await Store.getAll())
     .filter(a => (a.tags || []).includes(tag))
@@ -623,8 +537,7 @@ async function viewTag(tag) {
 
   if (!articles.length) {
     app.innerHTML = `
-      <div class="page-tag">
-        ${heading}
+      <div class="page-tag">${heading}
         <div class="empty-state"><p>这个标签下还没有文章</p></div>
       </div>`;
     return;
@@ -641,32 +554,26 @@ async function viewTag(tag) {
       </div>
     </article>`).join('');
 
-  app.innerHTML = `
-    <div class="page-tag">
-      ${heading}
-      <div class="article-list">${cards}</div>
-    </div>`;
+  app.innerHTML = `<div class="page-tag">${heading}<div class="article-list">${cards}</div></div>`;
 }
 
 // ─── View: About ──────────────────────────────────────────────────
-function viewAbout() {
-  document.title = `关于 — ${Config.title}`;
+async function viewAbout() {
+  document.title = `关于 — ${SITE.title}`;
   const app = document.getElementById('app');
-
-  const editBtn = Config.isOwner
-    ? `<div class="about-edit-btn"><button class="btn btn-ghost" onclick="editAbout()">编辑这段内容</button></div>`
+  const editBtn = currentUser
+    ? `<div class="about-edit-btn"><button class="btn btn-ghost" onclick="window.editAbout()">编辑这段内容</button></div>`
     : '';
-
   app.innerHTML = `
     <div class="page-about">
       ${renderPageHeading('About', '关于', '一些不会过时的话')}
-      <div class="about-content" id="about-content">${Config.about}</div>
+      <div class="about-content" id="about-content">${SITE.about}</div>
       ${editBtn}
     </div>`;
 }
 
 function editAbout() {
-  if (!Config.isOwner) return;
+  if (!currentUser) return;
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="page-about">
@@ -674,194 +581,100 @@ function editAbout() {
       <div class="rte-wrap" style="margin-top:1rem">
         ${renderToolbar()}
         <div class="rte-area">
-          <div id="rte" class="rte" contenteditable="true">${Config.about}</div>
+          <div id="rte" class="rte" contenteditable="true">${SITE.about}</div>
         </div>
       </div>
       <div style="display:flex;gap:.5rem;margin-top:1.25rem;justify-content:flex-end">
         <button class="btn btn-ghost" onclick="go('/about')">取消</button>
-        <button class="btn btn-primary" onclick="saveAbout()">保存（仅本设备）</button>
+        <button class="btn btn-primary" onclick="window.saveAbout()">保存</button>
       </div>
-      <p class="settings-help" style="margin-top:1rem">「关于」页面内容只保存在你这台浏览器，访客看到的是默认版本。如需让访客也看到，需要直接修改源代码里的 <code>DEFAULT_ABOUT</code>。</p>
+      <div id="editor-banner"></div>
     </div>`;
   initEditor();
 }
+window.editAbout = editAbout;
 
-function saveAbout() {
+async function saveAbout() {
   const content = document.getElementById('rte').innerHTML.trim();
-  Config.setAbout(content || DEFAULT_ABOUT);
-  go('/about');
+  const banner = document.getElementById('editor-banner');
+  try {
+    banner.innerHTML = `<div class="banner banner-info">保存中…</div>`;
+    await saveAboutToCloud(content || DEFAULT_ABOUT);
+    go('/about');
+  } catch (e) {
+    banner.innerHTML = `<div class="banner banner-error">保存失败：${esc(e.message)}</div>`;
+  }
 }
+window.saveAbout = saveAbout;
 
 // ─── View: Settings ───────────────────────────────────────────────
 function viewSettings() {
-  document.title = `设置 — ${Config.title}`;
+  document.title = `设置 — ${SITE.title}`;
   const app = document.getElementById('app');
 
-  const isOwner = Config.isOwner;
-  const identity = isOwner
-    ? `<div class="identity-card">
-         <div class="identity-dot owner"></div>
-         <div class="identity-text">
-           <div class="identity-role">主人模式</div>
-           <div class="identity-sub">你可以写、编辑、发布文章</div>
-         </div>
-       </div>`
-    : `<div class="identity-card">
-         <div class="identity-dot visitor"></div>
-         <div class="identity-text">
-           <div class="identity-role">访客模式</div>
-           <div class="identity-sub">只能阅读公开文章。配置 Token 即可解锁写作功能</div>
-         </div>
-       </div>`;
+  if (currentUser) {
+    const provider = currentUser.providerData[0] || {};
+    const ghName = provider.displayName || currentUser.displayName || provider.email || 'GitHub user';
+    const photo = currentUser.photoURL
+      ? `<img src="${esc(currentUser.photoURL)}" style="width:48px;height:48px;border-radius:50%" alt="">`
+      : '';
+    app.innerHTML = `
+      <div class="page-settings">
+        ${renderPageHeading('Settings', '设置', '账号与站点配置')}
 
-  app.innerHTML = `
-    <div class="page-settings">
-      ${renderPageHeading('Settings', '设置', '配置仓库连接与身份')}
+        <div class="identity-card" style="padding:1.25rem">
+          ${photo}
+          <div class="identity-text">
+            <div class="identity-role">${esc(ghName)}</div>
+            <div class="identity-sub">已用 GitHub 登录 · UID: <code style="font-size:.78rem">${esc(currentUser.uid)}</code></div>
+          </div>
+        </div>
 
-      ${identity}
+        <section class="settings-section">
+          <p class="settings-help">
+            当前你处于<b>主人模式</b>，可以写文章。可见性「公开」对所有访客可见；「仅自己」只有你登录后能看到。
+            权限隔离由 Firebase 服务器强制，访客即使打开浏览器开发者工具也绕不过。
+          </p>
+        </section>
 
-      <section class="settings-section">
-        <label class="settings-label">GitHub 用户名</label>
-        <input type="text" class="settings-input" id="cfg-owner"
-          value="${esc(Config.owner)}" placeholder="例如：gudaoyuqiao">
-        <p class="settings-help">部署仓库的 GitHub 账号。</p>
-      </section>
+        <div class="settings-actions">
+          <button class="btn btn-ghost btn-danger" onclick="window.logoutAction()">登出</button>
+        </div>
+      </div>`;
+  } else {
+    app.innerHTML = `
+      <div class="page-settings">
+        ${renderPageHeading('Settings', '设置', '登录后可以写文章')}
 
-      <section class="settings-section">
-        <label class="settings-label">仓库名</label>
-        <input type="text" class="settings-input" id="cfg-repo"
-          value="${esc(Config.repo)}" placeholder="例如：gudaoyuqiao.github.io">
-        <p class="settings-help">公开文章会被写入这个仓库的 <code>data/public.json</code>。</p>
-      </section>
+        <div class="identity-card">
+          <div class="identity-dot visitor"></div>
+          <div class="identity-text">
+            <div class="identity-role">访客模式</div>
+            <div class="identity-sub">登录后才能写、编辑、删除文章</div>
+          </div>
+        </div>
 
-      <section class="settings-section">
-        <label class="settings-label">Personal Access Token</label>
-        <input type="password" class="settings-input" id="cfg-token"
-          value="${esc(Config.token)}" placeholder="ghp_… 或 github_pat_…" autocomplete="off">
-        <p class="settings-help">Token 只保存在你这台浏览器，不会上传到任何地方。</p>
+        <section class="settings-section">
+          <p class="settings-help">用 GitHub 账号登录。只有博客的拥有者（在 Firebase 安全规则里指定的 UID）能写文章；其他人即使登录也只能读公开内容。</p>
+        </section>
 
-        <details style="margin-top:1rem">
-          <summary style="cursor:pointer;font-size:.88rem;color:var(--accent)">如何生成 Token？（点击展开步骤）</summary>
-          <ol class="guide-list" style="margin-top:.75rem">
-            <li>打开 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com/settings/personal-access-tokens/new</a></li>
-            <li><b>Token name</b>：随便填，比如 <code>blog</code></li>
-            <li><b>Expiration</b>：建议 90 天或自定义</li>
-            <li><b>Repository access</b>：选 <code>Only select repositories</code> → 选 <code>${esc(Config.repo || '你的仓库')}</code></li>
-            <li><b>Permissions → Repository permissions</b>：找到 <code>Contents</code>，改为 <code>Read and write</code></li>
-            <li>点底部 <code>Generate token</code>，复制得到的字符串粘到上面的输入框</li>
-          </ol>
-        </details>
-      </section>
-
-      <section class="settings-section">
-        <label class="settings-label">私密文章密码（可选，用于多设备同步）</label>
-        <input type="password" class="settings-input" id="cfg-passphrase"
-          value="${esc(Config.passphrase)}" placeholder="输入一段难猜的密码" autocomplete="off">
-        <p class="settings-help">
-          <b>不配置</b>：私密文章只存在当前浏览器，换设备看不到。<br>
-          <b>配置后</b>：「仅自己可见」文章会用此密码加密推送到 <code>data/private.json</code>，
-          其他设备只要配相同密码就能解密查看。密码<b>只存本地</b>，不会上传。
-        </p>
-        <p class="settings-help" style="color:var(--text-muted);margin-top:.5rem">
-          ⚠ 忘记密码 = 已加密的文章永久无法读取。建议自己额外记一份。
-        </p>
-      </section>
-
-      <div class="settings-actions">
-        <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
-        ${isOwner
-          ? `<button class="btn btn-ghost btn-danger" onclick="logoutOwner()">登出（清除 Token 和密码）</button>`
-          : ''}
-      </div>
-
-      <div id="settings-banner"></div>
-    </div>`;
-}
-
-async function saveSettings() {
-  const owner = document.getElementById('cfg-owner').value.trim();
-  const repo  = document.getElementById('cfg-repo').value.trim();
-  const token = document.getElementById('cfg-token').value.trim();
-  const passphrase = document.getElementById('cfg-passphrase').value;
-  const banner = document.getElementById('settings-banner');
-
-  const prevPassphrase = Config.passphrase;
-
-  Config.owner = owner;
-  Config.repo  = repo;
-  Config.token = token;
-  Config.passphrase = passphrase;
-
-  if (!token) {
-    banner.innerHTML = `<div class="banner banner-info">设置已保存（未配置 Token，当前是访客模式）。</div>`;
-    syncOwnerUI();
-    return;
-  }
-
-  banner.innerHTML = `<div class="banner banner-info">正在验证 Token…</div>`;
-  try {
-    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: Remote.headers(),
-    });
-    if (!r.ok) {
-      if (r.status === 401) throw new Error('Token 无效或已过期');
-      if (r.status === 404) throw new Error('仓库不存在或 Token 没有访问权限');
-      throw new Error(`验证失败：${r.status}`);
-    }
-    const data = await r.json();
-    if (!data.permissions || !data.permissions.push) {
-      throw new Error('Token 缺少 Contents: read/write 权限');
-    }
-
-    let extra = '';
-
-    // Passphrase scenarios:
-    if (passphrase) {
-      // Try to fetch+decrypt remote private.json with new passphrase
-      Remote.privateLoaded = false;  // force refetch
-      try {
-        await Remote.fetchPrivate();
-        extra = `已加载远程私密文章 ${Remote.cachePrivate.length} 篇。`;
-      } catch (e) {
-        // Decrypt failed: could be wrong passphrase, OR no remote file yet
-        if (Remote.cachePrivate === null || Remote.cachePrivate.length === 0) {
-          // No remote yet; if we have local privates, push them now
-          const localPrivates = Store.getLocal().filter(a => a.visibility === 'private');
-          if (localPrivates.length > 0) {
-            try {
-              await Store.syncPrivate();
-              extra = `已加密并上传本地的 ${localPrivates.length} 篇私密文章到 GitHub。`;
-            } catch (e2) {
-              extra = `本地私密文章同步失败：${e2.message}`;
-            }
-          } else {
-            extra = '密码已保存（暂无私密文章可同步）。';
-          }
-        } else {
-          extra = '⚠ 远程 data/private.json 存在但解密失败，请检查密码是否正确。';
-        }
-      }
-    } else if (prevPassphrase) {
-      extra = '密码已清除，私密文章将不再同步到 GitHub。';
-    }
-
-    banner.innerHTML = `<div class="banner banner-success">✓ 验证通过！现在你处于主人模式。${extra ? '<br>' + esc(extra) : ''}</div>`;
-    syncOwnerUI();
-    setTimeout(() => viewSettings(), 1500);
-  } catch (err) {
-    banner.innerHTML = `<div class="banner banner-error">${esc(err.message)}</div>`;
+        <div class="settings-actions">
+          <button class="btn btn-primary btn-lg" onclick="window.loginWithGithub()">
+            <span style="display:inline-flex;align-items:center;gap:.5rem">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .5C5.6.5.5 5.6.5 12c0 5.1 3.3 9.4 7.8 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.8-1.4-3.8-1.4-.5-1.3-1.3-1.6-1.3-1.6-1-.7.1-.7.1-.7 1.1.1 1.7 1.2 1.7 1.2 1 1.7 2.7 1.2 3.4.9.1-.7.4-1.2.7-1.5-2.5-.3-5.2-1.3-5.2-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.5 4.5-1.5 7.8-5.8 7.8-10.9C23.5 5.6 18.4.5 12 .5z"/>
+              </svg>
+              用 GitHub 登录
+            </span>
+          </button>
+        </div>
+      </div>`;
   }
 }
+window.logoutAction = logoutAction;
+window.loginWithGithub = loginWithGithub;
 
-function logoutOwner() {
-  if (!confirm('登出后将无法再写或发布文章。也会清除本地保存的密码。继续吗？')) return;
-  Config.token = '';
-  Config.passphrase = '';
-  syncOwnerUI();
-  viewSettings();
-}
-
-// ─── Helper: Page Heading ─────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────
 function renderPageHeading(eyebrow, title, desc) {
   return `
     <div class="page-heading">
@@ -875,73 +688,83 @@ function renderToolbar() {
   return `
     <div class="toolbar" id="toolbar">
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="bold"          title="粗体"><b>B</b></button>
-        <button class="tb-btn" data-cmd="italic"        title="斜体"><i>I</i></button>
-        <button class="tb-btn" data-cmd="underline"     title="下划线"><u>U</u></button>
-        <button class="tb-btn" data-cmd="strikeThrough" title="删除线"><s>S</s></button>
+        <button class="tb-btn" data-cmd="bold"><b>B</b></button>
+        <button class="tb-btn" data-cmd="italic"><i>I</i></button>
+        <button class="tb-btn" data-cmd="underline"><u>U</u></button>
+        <button class="tb-btn" data-cmd="strikeThrough"><s>S</s></button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="h2"  title="二级标题">H2</button>
-        <button class="tb-btn" data-cmd="h3"  title="三级标题">H3</button>
-        <button class="tb-btn" data-cmd="p"   title="正文">¶</button>
+        <button class="tb-btn" data-cmd="h2">H2</button>
+        <button class="tb-btn" data-cmd="h3">H3</button>
+        <button class="tb-btn" data-cmd="p">¶</button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="insertUnorderedList" title="无序列表">• 列表</button>
-        <button class="tb-btn" data-cmd="insertOrderedList"   title="有序列表">1. 列表</button>
-        <button class="tb-btn" data-cmd="blockquote"          title="引用块">引用</button>
+        <button class="tb-btn" data-cmd="insertUnorderedList">• 列表</button>
+        <button class="tb-btn" data-cmd="insertOrderedList">1. 列表</button>
+        <button class="tb-btn" data-cmd="blockquote">引用</button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="link"  title="插入链接">🔗</button>
-        <button class="tb-btn" data-cmd="image" title="插入图片">🖼</button>
-        <button class="tb-btn" data-cmd="hr"    title="分隔线">—</button>
-        <button class="tb-btn" data-cmd="removeFormat" title="清除格式">✕</button>
+        <button class="tb-btn" data-cmd="link">🔗</button>
+        <button class="tb-btn" data-cmd="image">🖼</button>
+        <button class="tb-btn" data-cmd="hr">—</button>
+        <button class="tb-btn" data-cmd="removeFormat">✕</button>
       </div>
       <span class="tb-sep"></span>
       <div class="tb-group">
-        <button class="tb-btn" data-cmd="undo" title="撤销">↩</button>
-        <button class="tb-btn" data-cmd="redo" title="重做">↪</button>
+        <button class="tb-btn" data-cmd="undo">↩</button>
+        <button class="tb-btn" data-cmd="redo">↪</button>
       </div>
     </div>`;
 }
 
 // ─── View: Editor ─────────────────────────────────────────────────
 async function viewEditor(id) {
-  if (!Config.isOwner) {
+  if (!currentUser) {
     document.getElementById('app').innerHTML = `
       <div class="error-page">
-        <h2>需要主人模式</h2>
-        <p>请先到 <a href="#/settings" style="color:var(--accent);text-decoration:underline">设置</a> 配置 GitHub Token 后再写文章。</p>
+        <h2>需要登录</h2>
+        <p>请先到 <a href="#/settings" style="color:var(--accent);text-decoration:underline">设置</a> 用 GitHub 登录后再写文章。</p>
       </div>`;
     return;
   }
 
   const a = id ? await Store.get(id) : null;
+
+  if (id && !a) {
+    document.getElementById('app').innerHTML = `<div class="error-page"><h2>文章不存在</h2></div>`;
+    return;
+  }
+  if (a && !canEdit(a)) {
+    document.getElementById('app').innerHTML = `<div class="error-page"><h2>你不是这篇文章的作者</h2></div>`;
+    return;
+  }
+
   const app = document.getElementById('app');
   const currentVis = a?.visibility || 'public';
 
-  document.title = `${a ? '编辑文章' : '写文章'} — ${Config.title}`;
+  document.title = `${a ? '编辑文章' : '写文章'} — ${SITE.title}`;
 
   app.innerHTML = `
     <div class="page-editor">
       <div class="editor-topbar">
         <a href="${id ? '#/article/' + id : '#/'}" class="back-link">← 取消</a>
-        <button class="btn btn-primary" id="publish-btn" onclick="saveArt('${id || ''}')">发布</button>
+        <button class="btn btn-primary" id="publish-btn" onclick="window.saveArt('${id || ''}')">发布</button>
       </div>
 
       <input id="art-title" class="input-title" type="text"
         placeholder="文章标题…" value="${a ? esc(a.title) : ''}">
 
       <input id="art-tags" class="input-tags" type="text"
-        placeholder="标签（用逗号分隔，如：技术, 生活, 随笔）"
+        placeholder="标签（用逗号分隔）"
         value="${a ? esc((a.tags || []).join(', ')) : ''}">
 
       <div class="visibility-row">
         <span class="visibility-label">可见性</span>
         <div class="vis-toggle">
-          <input type="radio" id="vis-public"  name="visibility" value="public" ${currentVis === 'public' ? 'checked' : ''}>
+          <input type="radio" id="vis-public"  name="visibility" value="public"  ${currentVis === 'public'  ? 'checked' : ''}>
           <label for="vis-public">🌐 公开</label>
           <input type="radio" id="vis-private" name="visibility" value="private" ${currentVis === 'private' ? 'checked' : ''}>
           <label for="vis-private">🔒 仅自己</label>
@@ -957,37 +780,26 @@ async function viewEditor(id) {
         </div>
       </div>
 
-      <div class="editor-footer">
-        <span id="word-count" class="word-count">0 字</span>
-      </div>
-
+      <div class="editor-footer"><span id="word-count" class="word-count">0 字</span></div>
       <div id="editor-banner"></div>
     </div>`;
 
   initEditor();
 
-  // Visibility hint
   const updateHint = () => {
     const v = document.querySelector('input[name="visibility"]:checked').value;
-    const el = document.getElementById('vis-hint');
-    if (v === 'public') {
-      el.textContent = '将提交到 GitHub，所有人可见';
-    } else if (Config.passphrase) {
-      el.textContent = '将加密同步到 GitHub，仅你（输入密码后）可见';
-    } else {
-      el.textContent = '只存本设备 · 设置密码可跨设备同步';
-    }
+    document.getElementById('vis-hint').textContent =
+      v === 'public' ? '所有访客都能看到' : '只有你登录后能看到';
   };
   document.querySelectorAll('input[name="visibility"]')
     .forEach(el => el.addEventListener('change', updateHint));
   updateHint();
 }
 
-// ─── Editor Logic ─────────────────────────────────────────────────
 function initEditor() {
   const toolbar = document.getElementById('toolbar');
-  const rte     = document.getElementById('rte');
-  const wcEl    = document.getElementById('word-count');
+  const rte = document.getElementById('rte');
+  const wcEl = document.getElementById('word-count');
   if (!rte) return;
 
   function checkEmpty() {
@@ -995,20 +807,15 @@ function initEditor() {
     const ph = document.getElementById('rte-ph');
     if (ph) ph.classList.toggle('visible', empty);
   }
-
   function updateCount() {
     if (!wcEl) return;
-    const n = rte.innerText.trim().replace(/\s+/g, '').length;
-    wcEl.textContent = n + ' 字';
+    wcEl.textContent = rte.innerText.trim().replace(/\s+/g, '').length + ' 字';
   }
-
   function updateStates() {
-    const stateful = ['bold', 'italic', 'underline', 'strikeThrough',
-                      'insertUnorderedList', 'insertOrderedList'];
+    const stateful = ['bold','italic','underline','strikeThrough','insertUnorderedList','insertOrderedList'];
     document.querySelectorAll('.tb-btn[data-cmd]').forEach(btn => {
       if (!stateful.includes(btn.dataset.cmd)) return;
-      try { btn.classList.toggle('active', document.queryCommandState(btn.dataset.cmd)); }
-      catch (_) {}
+      try { btn.classList.toggle('active', document.queryCommandState(btn.dataset.cmd)); } catch {}
     });
   }
 
@@ -1017,32 +824,28 @@ function initEditor() {
     if (!btn) return;
     e.preventDefault();
     const cmd = btn.dataset.cmd;
-
-    if (['h2', 'h3'].includes(cmd))      document.execCommand('formatBlock', false, cmd);
-    else if (cmd === 'p')                 document.execCommand('formatBlock', false, 'p');
-    else if (cmd === 'blockquote')        document.execCommand('formatBlock', false, 'blockquote');
+    if (['h2','h3'].includes(cmd))    document.execCommand('formatBlock', false, cmd);
+    else if (cmd === 'p')              document.execCommand('formatBlock', false, 'p');
+    else if (cmd === 'blockquote')     document.execCommand('formatBlock', false, 'blockquote');
     else if (cmd === 'link') {
       const url = prompt('请输入链接地址：', 'https://');
       if (url && url.trim()) document.execCommand('createLink', false, url.trim());
     } else if (cmd === 'image') {
       const url = prompt('请输入图片链接地址：', 'https://');
       if (url && url.trim()) document.execCommand('insertImage', false, url.trim());
-    } else if (cmd === 'hr')              document.execCommand('insertHTML', false, '<hr>');
-    else                                   document.execCommand(cmd, false, null);
-
+    } else if (cmd === 'hr')           document.execCommand('insertHTML', false, '<hr>');
+    else                                document.execCommand(cmd, false, null);
     rte.focus();
     updateStates();
     updateCount();
   });
 
-  rte.addEventListener('input',  () => { updateCount(); updateStates(); checkEmpty(); });
-  rte.addEventListener('keyup',  updateStates);
+  rte.addEventListener('input',   () => { updateCount(); updateStates(); checkEmpty(); });
+  rte.addEventListener('keyup',   updateStates);
   rte.addEventListener('mouseup', updateStates);
-
   rte.addEventListener('paste', e => {
     e.preventDefault();
-    const text = e.clipboardData.getData('text/plain');
-    document.execCommand('insertText', false, text);
+    document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
   });
 
   updateCount();
@@ -1062,31 +865,28 @@ async function saveArt(id) {
     alert('请输入文章内容'); document.getElementById('rte').focus(); return;
   }
 
-  const tags      = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const now       = new Date().toISOString();
-  const existing  = id ? await Store.get(id) : null;
-  const articleId = id || uid();
-
-  const article = {
-    id: articleId,
-    title, content, tags, visibility,
-    createdAt: existing ? existing.createdAt : now,
-    updatedAt: now,
-  };
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const articleData = { title, content, tags, visibility };
 
   publishBtn.disabled = true;
-  publishBtn.textContent = visibility === 'public' ? '推送到 GitHub…' : '保存中…';
-  banner.innerHTML = '';
+  publishBtn.textContent = '保存中…';
+  if (banner) banner.innerHTML = '';
 
   try {
-    await Store.upsert(article);
+    let articleId = id;
+    if (id) {
+      await Store.update(id, articleData);
+    } else {
+      articleId = await Store.create(articleData);
+    }
     go('/article/' + articleId);
-  } catch (err) {
-    banner.innerHTML = `<div class="banner banner-error">发布失败：${esc(err.message || String(err))}<br><br>文章已保存到本地，可以稍后重试。如果是 Token 问题，请到「设置」检查。</div>`;
+  } catch (e) {
+    if (banner) banner.innerHTML = `<div class="banner banner-error">保存失败：${esc(e.message)}</div>`;
     publishBtn.disabled = false;
-    publishBtn.textContent = '重试发布';
+    publishBtn.textContent = '重试';
   }
 }
+window.saveArt = saveArt;
 
 // ─── Search Modal ─────────────────────────────────────────────────
 let searchFocusIdx = -1;
@@ -1099,32 +899,18 @@ function initSearch() {
   const results = document.getElementById('search-results');
 
   btn.addEventListener('click', openSearch);
-
   modal.addEventListener('click', e => {
     if (e.target.dataset.close !== undefined) closeSearch();
   });
-
   input.addEventListener('input', () => runSearch(input.value));
-
   input.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeSearch();
-    else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      searchFocusIdx = Math.min(searchFocusIdx + 1, searchHits.length - 1);
-      paintFocus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      searchFocusIdx = Math.max(searchFocusIdx - 1, 0);
-      paintFocus();
-    } else if (e.key === 'Enter') {
-      if (searchHits[searchFocusIdx]) {
-        const id = searchHits[searchFocusIdx].id;
-        closeSearch();
-        go('/article/' + id);
-      }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); searchFocusIdx = Math.min(searchFocusIdx + 1, searchHits.length - 1); paintFocus(); }
+    else if (e.key === 'ArrowUp')   { e.preventDefault(); searchFocusIdx = Math.max(searchFocusIdx - 1, 0); paintFocus(); }
+    else if (e.key === 'Enter') {
+      if (searchHits[searchFocusIdx]) { const id = searchHits[searchFocusIdx].id; closeSearch(); go('/article/' + id); }
     }
   });
-
   function paintFocus() {
     results.querySelectorAll('.search-item').forEach((el, i) =>
       el.classList.toggle('focused', i === searchFocusIdx));
@@ -1147,6 +933,7 @@ async function openSearch() {
 function closeSearch() {
   document.getElementById('search-modal').hidden = true;
 }
+window.closeSearch = closeSearch;
 
 async function runSearch(q) {
   const results = document.getElementById('search-results');
@@ -1180,7 +967,7 @@ async function runSearch(q) {
 
 function renderSearchItem(a, query) {
   return `
-    <div class="search-item" onclick="closeSearch();go('/article/${a.id}')">
+    <div class="search-item" onclick="window.closeSearch();go('/article/${a.id}')">
       <div class="search-item-title">${highlight(a.title, query)}${a.visibility === 'private' ? ' 🔒' : ''}</div>
       <div class="search-item-snippet">${highlight(excerpt(a.content, 90), query)}</div>
     </div>`;
