@@ -23,6 +23,11 @@ const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
 const githubProvider = new GithubAuthProvider();
 
+// Owner Firebase UID — must match Firestore security rules.
+// Knowing this is not a security risk; rules enforce it server-side.
+const OWNER_UID = 'Alyn0DmpNdbMPsdSBWzn7qoy8zD3';
+function isOwner() { return currentUser?.uid === OWNER_UID; }
+
 // ─── Site Config ──────────────────────────────────────────────────
 const SITE = {
   title: 'My Blog',
@@ -73,7 +78,7 @@ onAuthStateChanged(auth, async (user) => {
 
 function updateAuthUI() {
   const writeBtn = document.getElementById('write-btn');
-  if (writeBtn) writeBtn.hidden = !currentUser;
+  if (writeBtn) writeBtn.hidden = !isOwner();
 }
 
 async function loginWithGithub() {
@@ -116,7 +121,7 @@ const Store = {
   async getAll() {
     try {
       let q;
-      if (currentUser) {
+      if (isOwner()) {
         q = query(collection(db, 'articles'), orderBy('createdAt', 'desc'));
       } else {
         q = query(collection(db, 'articles'),
@@ -173,7 +178,7 @@ const Store = {
 
 // ─── Sample seed for first-time owner ─────────────────────────────
 async function seedIfEmpty() {
-  if (!currentUser) return;
+  if (!isOwner()) return;
   try {
     const snap = await getDocs(query(collection(db, 'articles'), limit(1)));
     if (!snap.empty) return;
@@ -279,7 +284,7 @@ function lockBadge(visibility) {
 }
 
 function canEdit(article) {
-  return currentUser && article.authorUid === currentUser.uid;
+  return isOwner() && article.authorUid === currentUser.uid;
 }
 
 // ─── Router ───────────────────────────────────────────────────────
@@ -368,8 +373,8 @@ async function viewHome() {
         ${hero}
         <div class="empty-state">
           <div class="empty-icon">✒</div>
-          <p>${currentUser ? '还没有文章，来写第一篇吧' : '博主还没有发布任何文章'}</p>
-          ${currentUser ? `<a href="#/editor" class="btn btn-primary btn-lg">写第一篇文章</a>` : ''}
+          <p>${isOwner() ? '还没有文章，来写第一篇吧' : '博主还没有发布任何文章'}</p>
+          ${isOwner() ? `<a href="#/editor" class="btn btn-primary btn-lg">写第一篇文章</a>` : ''}
         </div>
       </div>`;
     return;
@@ -561,7 +566,7 @@ async function viewTag(tag) {
 async function viewAbout() {
   document.title = `关于 — ${SITE.title}`;
   const app = document.getElementById('app');
-  const editBtn = currentUser
+  const editBtn = isOwner()
     ? `<div class="about-edit-btn"><button class="btn btn-ghost" onclick="window.editAbout()">编辑这段内容</button></div>`
     : '';
   app.innerHTML = `
@@ -573,7 +578,7 @@ async function viewAbout() {
 }
 
 function editAbout() {
-  if (!currentUser) return;
+  if (!isOwner()) return;
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="page-about">
@@ -618,23 +623,32 @@ function viewSettings() {
     const photo = currentUser.photoURL
       ? `<img src="${esc(currentUser.photoURL)}" style="width:48px;height:48px;border-radius:50%" alt="">`
       : '';
+    const owner = isOwner();
+    const roleLabel = owner ? '主人模式' : '已登录访客';
+    const dotClass = owner ? 'owner' : 'visitor';
+    const description = owner
+      ? `<p class="settings-help">
+            可以写、改、删自己的文章。可见性「公开」对所有访客可见；「仅自己」只有你登录后能看到。
+            权限隔离由 Firebase 服务器强制，访客即使打开浏览器开发者工具也绕不过。
+          </p>`
+      : `<p class="settings-help">
+            你已登录，但不是这个博客的拥有者。可以读公开文章，但无法写入。
+            如果你以为自己应该是拥有者，检查一下 Firestore 安全规则里指定的 UID 是否与下面这个 UID 匹配。
+          </p>`;
     app.innerHTML = `
       <div class="page-settings">
         ${renderPageHeading('Settings', '设置', '账号与站点配置')}
 
         <div class="identity-card" style="padding:1.25rem">
-          ${photo}
+          ${photo || `<div class="identity-dot ${dotClass}"></div>`}
           <div class="identity-text">
-            <div class="identity-role">${esc(ghName)}</div>
-            <div class="identity-sub">已用 GitHub 登录 · UID: <code style="font-size:.78rem">${esc(currentUser.uid)}</code></div>
+            <div class="identity-role">${esc(ghName)} · ${roleLabel}</div>
+            <div class="identity-sub">UID: <code style="font-size:.78rem">${esc(currentUser.uid)}</code></div>
           </div>
         </div>
 
         <section class="settings-section">
-          <p class="settings-help">
-            当前你处于<b>主人模式</b>，可以写文章。可见性「公开」对所有访客可见；「仅自己」只有你登录后能看到。
-            权限隔离由 Firebase 服务器强制，访客即使打开浏览器开发者工具也绕不过。
-          </p>
+          ${description}
         </section>
 
         <div class="settings-actions">
@@ -722,11 +736,13 @@ function renderToolbar() {
 
 // ─── View: Editor ─────────────────────────────────────────────────
 async function viewEditor(id) {
-  if (!currentUser) {
+  if (!isOwner()) {
     document.getElementById('app').innerHTML = `
       <div class="error-page">
-        <h2>需要登录</h2>
-        <p>请先到 <a href="#/settings" style="color:var(--accent);text-decoration:underline">设置</a> 用 GitHub 登录后再写文章。</p>
+        <h2>${currentUser ? '你不是博主' : '需要登录'}</h2>
+        <p>${currentUser
+          ? '只有博客的拥有者能写文章。'
+          : '请先到 <a href="#/settings" style="color:var(--accent);text-decoration:underline">设置</a> 用 GitHub 登录后再写文章。'}</p>
       </div>`;
     return;
   }
