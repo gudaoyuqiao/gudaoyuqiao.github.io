@@ -26,7 +26,56 @@ const Config = {
   },
   set repo(v)  { v ? localStorage.setItem('gh_repo', v) : localStorage.removeItem('gh_repo'); },
   get isOwner() { return !!this.token; },
+
+  get passphrase() { return localStorage.getItem('blog_passphrase') || ''; },
+  set passphrase(v) { v ? localStorage.setItem('blog_passphrase', v) : localStorage.removeItem('blog_passphrase'); },
 };
+
+// ─── Crypto (Web Crypto API, AES-256-GCM) ─────────────────────────
+const Crypto = {
+  async deriveKey(passphrase, salt) {
+    const enc = new TextEncoder();
+    const baseKey = await crypto.subtle.importKey(
+      'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']);
+  },
+  async encrypt(plaintext, passphrase) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv   = crypto.getRandomValues(new Uint8Array(12));
+    const key  = await this.deriveKey(passphrase, salt);
+    const ct   = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
+    return { v: 1, salt: b64encode(salt), iv: b64encode(iv), ct: b64encode(new Uint8Array(ct)) };
+  },
+  async decrypt(payload, passphrase) {
+    const salt = b64decode(payload.salt);
+    const iv   = b64decode(payload.iv);
+    const ct   = b64decode(payload.ct);
+    const key  = await this.deriveKey(passphrase, salt);
+    const pt   = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return new TextDecoder().decode(pt);
+  },
+};
+
+function b64encode(bytes) {
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+function b64decode(s) {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 const DEFAULT_ABOUT = `<h2>关于我</h2>
 <p>你好，欢迎来到我的小角落。</p>
@@ -37,53 +86,66 @@ const DEFAULT_ABOUT = `<h2>关于我</h2>
 
 // ─── Remote (GitHub) ──────────────────────────────────────────────
 const Remote = {
-  cache: null,
-  cacheSha: null,
-  cacheLoaded: false,
+  cachePublic: null,
+  cachePrivate: null,
+  publicLoaded: false,
+  privateLoaded: false,
 
   async fetchPublic() {
     try {
       const res = await fetch('data/public.json?t=' + Date.now(), { cache: 'no-store' });
-      if (!res.ok) return [];
+      if (!res.ok) { this.cachePublic = []; this.publicLoaded = true; return []; }
       const data = await res.json();
-      this.cache = Array.isArray(data) ? data : [];
-      this.cacheLoaded = true;
-      return this.cache;
+      this.cachePublic = Array.isArray(data) ? data : [];
+      this.publicLoaded = true;
+      return this.cachePublic;
     } catch (e) {
       console.error('Failed to fetch public.json', e);
-      this.cache = [];
-      this.cacheLoaded = true;
+      this.cachePublic = [];
+      this.publicLoaded = true;
       return [];
     }
   },
 
-  // Push the full list of public articles to data/public.json via GitHub Contents API
-  async commit(articles, message) {
+  async fetchPrivate() {
+    if (!Config.passphrase) { this.cachePrivate = []; this.privateLoaded = true; return []; }
+    try {
+      const res = await fetch('data/private.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) { this.cachePrivate = []; this.privateLoaded = true; return []; }
+      const encrypted = await res.json();
+      const json = await Crypto.decrypt(encrypted, Config.passphrase);
+      const data = JSON.parse(json);
+      this.cachePrivate = Array.isArray(data) ? data : [];
+      this.privateLoaded = true;
+      return this.cachePrivate;
+    } catch (e) {
+      console.error('Failed to decrypt private.json', e);
+      this.cachePrivate = [];
+      this.privateLoaded = true;
+      throw new Error('私密文章解密失败，可能是密码不对或文件损坏');
+    }
+  },
+
+  async commitFile(path, contentString, message) {
     if (!Config.token) throw new Error('请先在「设置」里配置 GitHub Token');
     if (!Config.owner || !Config.repo) throw new Error('请先在「设置」里配置仓库信息');
 
-    const apiUrl = `https://api.github.com/repos/${Config.owner}/${Config.repo}/contents/data/public.json`;
+    const apiUrl = `https://api.github.com/repos/${Config.owner}/${Config.repo}/contents/${path}`;
 
-    // Always GET to fetch current sha (file may have been updated by another device)
     let sha = null;
     try {
       const r = await fetch(apiUrl, { headers: this.headers() });
       if (r.ok) sha = (await r.json()).sha;
       else if (r.status !== 404) {
         const t = await r.text();
-        throw new Error(`读取 public.json 失败：${r.status} ${t.slice(0, 200)}`);
+        throw new Error(`读取 ${path} 失败：${r.status} ${t.slice(0, 200)}`);
       }
     } catch (e) {
-      if (e.message.includes('public.json 失败')) throw e;
-      // Network error; keep going without sha (will fail if file exists)
+      if (e.message.includes('失败')) throw e;
     }
 
-    const sorted = [...articles].sort((a, b) =>
-      new Date(b.createdAt) - new Date(a.createdAt));
-    const json = JSON.stringify(sorted, null, 2);
-    const content = btoa(unescape(encodeURIComponent(json)));
-
-    const body = { message: message || 'Update articles', content };
+    const content = btoa(unescape(encodeURIComponent(contentString)));
+    const body = { message, content };
     if (sha) body.sha = sha;
 
     const r2 = await fetch(apiUrl, {
@@ -93,16 +155,31 @@ const Remote = {
     });
 
     if (!r2.ok) {
-      const errText = await r2.text();
       let hint = '';
       if (r2.status === 401) hint = ' Token 无效或已过期。';
       else if (r2.status === 403) hint = ' Token 权限不足，需要 Contents: read/write 权限。';
       else if (r2.status === 404) hint = ' 仓库或路径不存在，检查仓库名。';
       throw new Error(`GitHub 推送失败：${r2.status}.${hint}`);
     }
-
-    this.cache = sorted;
     return r2.json();
+  },
+
+  async commitPublic(articles) {
+    const sorted = [...articles].sort((a, b) =>
+      new Date(b.createdAt) - new Date(a.createdAt));
+    const json = JSON.stringify(sorted, null, 2);
+    await this.commitFile('data/public.json', json, `Update public articles (${sorted.length})`);
+    this.cachePublic = sorted;
+  },
+
+  async commitPrivate(articles) {
+    if (!Config.passphrase) throw new Error('请在「设置」里配置私密文章密码');
+    const sorted = [...articles].sort((a, b) =>
+      new Date(b.createdAt) - new Date(a.createdAt));
+    const encrypted = await Crypto.encrypt(JSON.stringify(sorted), Config.passphrase);
+    const json = JSON.stringify(encrypted, null, 2);
+    await this.commitFile('data/private.json', json, `Update private articles (${sorted.length})`);
+    this.cachePrivate = sorted;
   },
 
   headers() {
@@ -123,43 +200,55 @@ const Store = {
 
   saveLocal(articles) { localStorage.setItem('blog_articles', JSON.stringify(articles)); },
 
-  // Sync remote public → local for owner: ensures local has all published articles
+  // Sync remote (public + decrypted private) → local for owner
   async syncRemoteIntoLocal() {
     if (!Config.isOwner) return;
-    if (!Remote.cacheLoaded) await Remote.fetchPublic();
-    const remote = Remote.cache || [];
+
+    const remoteList = [];
+
+    if (!Remote.publicLoaded) await Remote.fetchPublic();
+    (Remote.cachePublic || []).forEach(a => remoteList.push({ ...a, visibility: 'public' }));
+
+    if (Config.passphrase) {
+      try {
+        if (!Remote.privateLoaded) await Remote.fetchPrivate();
+        (Remote.cachePrivate || []).forEach(a => remoteList.push({ ...a, visibility: 'private' }));
+      } catch (e) {
+        // Decryption failed; surface via banner but don't block other articles
+        console.warn(e.message);
+        window.__lastSyncError = e.message;
+      }
+    }
+
     const local = this.getLocal();
     const byId = new Map(local.map(a => [a.id, a]));
-
     let changed = false;
-    remote.forEach(r => {
-      const tagged = { ...r, visibility: 'public' };
+    remoteList.forEach(r => {
       const existing = byId.get(r.id);
       if (!existing) {
-        local.push(tagged);
+        local.push(r);
+        byId.set(r.id, r);
         changed = true;
       } else if (new Date(r.updatedAt) > new Date(existing.updatedAt)) {
-        Object.assign(existing, tagged);
+        Object.assign(existing, r);
         changed = true;
       }
     });
     if (changed) this.saveLocal(local);
   },
 
-  // The merged view shown to the user (depending on isOwner)
   async getAll() {
-    if (!Remote.cacheLoaded) await Remote.fetchPublic();
+    if (!Remote.publicLoaded) await Remote.fetchPublic();
 
     if (Config.isOwner) {
       await this.syncRemoteIntoLocal();
       const local = this.getLocal();
-      // Normalize missing visibility → treat as private (safe default)
       local.forEach(a => { if (!a.visibility) a.visibility = 'private'; });
       return [...local].sort((a, b) =>
         new Date(b.createdAt) - new Date(a.createdAt));
     }
 
-    return [...(Remote.cache || [])].sort((a, b) =>
+    return [...(Remote.cachePublic || [])].sort((a, b) =>
       new Date(b.createdAt) - new Date(a.createdAt));
   },
 
@@ -168,38 +257,46 @@ const Store = {
     return all.find(a => a.id === id) || null;
   },
 
-  // Save (insert or update) — handles remote sync if needed
   async upsert(article) {
     const local = this.getLocal();
     const prev = local.find(a => a.id === article.id);
-    const wasPublic = prev && prev.visibility === 'public';
+    const wasPublic  = prev && prev.visibility === 'public';
+    const wasPrivate = prev && prev.visibility === 'private';
 
     const i = local.findIndex(a => a.id === article.id);
     if (i >= 0) local[i] = article;
     else local.unshift(article);
     this.saveLocal(local);
 
-    const isPublic = article.visibility === 'public';
-    // Sync when: now public, or was public (transitioning to private requires remote removal)
-    if ((isPublic || wasPublic) && Config.isOwner) {
-      await this.syncPublic();
-    }
+    if (!Config.isOwner) return;
+    const isPublic  = article.visibility === 'public';
+    const isPrivate = article.visibility === 'private';
+
+    if (wasPublic || isPublic) await this.syncPublic();
+    if ((wasPrivate || isPrivate) && Config.passphrase) await this.syncPrivate();
   },
 
   async remove(id) {
     const local = this.getLocal();
     const target = local.find(a => a.id === id);
-    const wasPublic = target && target.visibility === 'public';
+    const wasPublic  = target && target.visibility === 'public';
+    const wasPrivate = target && target.visibility === 'private';
 
     this.saveLocal(local.filter(a => a.id !== id));
 
-    if (wasPublic && Config.isOwner) await this.syncPublic();
+    if (!Config.isOwner) return;
+    if (wasPublic) await this.syncPublic();
+    if (wasPrivate && Config.passphrase) await this.syncPrivate();
   },
 
-  // Push all local visibility=public articles to data/public.json
   async syncPublic() {
     const publics = this.getLocal().filter(a => a.visibility === 'public');
-    await Remote.commit(publics, `Update articles (${publics.length})`);
+    await Remote.commitPublic(publics);
+  },
+
+  async syncPrivate() {
+    const privates = this.getLocal().filter(a => a.visibility === 'private');
+    await Remote.commitPrivate(privates);
   },
 };
 
@@ -279,7 +376,7 @@ async function route() {
     const m = path.match(rx);
     if (m) {
       try {
-        if (!Remote.cacheLoaded) {
+        if (!Remote.publicLoaded) {
           app.innerHTML = `<div class="loading">加载中…</div>`;
         }
         await fn(m);
@@ -656,10 +753,24 @@ function viewSettings() {
         </details>
       </section>
 
+      <section class="settings-section">
+        <label class="settings-label">私密文章密码（可选，用于多设备同步）</label>
+        <input type="password" class="settings-input" id="cfg-passphrase"
+          value="${esc(Config.passphrase)}" placeholder="输入一段难猜的密码" autocomplete="off">
+        <p class="settings-help">
+          <b>不配置</b>：私密文章只存在当前浏览器，换设备看不到。<br>
+          <b>配置后</b>：「仅自己可见」文章会用此密码加密推送到 <code>data/private.json</code>，
+          其他设备只要配相同密码就能解密查看。密码<b>只存本地</b>，不会上传。
+        </p>
+        <p class="settings-help" style="color:var(--text-muted);margin-top:.5rem">
+          ⚠ 忘记密码 = 已加密的文章永久无法读取。建议自己额外记一份。
+        </p>
+      </section>
+
       <div class="settings-actions">
         <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
         ${isOwner
-          ? `<button class="btn btn-ghost btn-danger" onclick="logoutOwner()">登出（清除 Token）</button>`
+          ? `<button class="btn btn-ghost btn-danger" onclick="logoutOwner()">登出（清除 Token 和密码）</button>`
           : ''}
       </div>
 
@@ -671,11 +782,15 @@ async function saveSettings() {
   const owner = document.getElementById('cfg-owner').value.trim();
   const repo  = document.getElementById('cfg-repo').value.trim();
   const token = document.getElementById('cfg-token').value.trim();
+  const passphrase = document.getElementById('cfg-passphrase').value;
   const banner = document.getElementById('settings-banner');
+
+  const prevPassphrase = Config.passphrase;
 
   Config.owner = owner;
   Config.repo  = repo;
   Config.token = token;
+  Config.passphrase = passphrase;
 
   if (!token) {
     banner.innerHTML = `<div class="banner banner-info">设置已保存（未配置 Token，当前是访客模式）。</div>`;
@@ -683,7 +798,6 @@ async function saveSettings() {
     return;
   }
 
-  // Validate token by trying to access the repo
   banner.innerHTML = `<div class="banner banner-info">正在验证 Token…</div>`;
   try {
     const r = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
@@ -698,18 +812,51 @@ async function saveSettings() {
     if (!data.permissions || !data.permissions.push) {
       throw new Error('Token 缺少 Contents: read/write 权限');
     }
-    banner.innerHTML = `<div class="banner banner-success">✓ 验证通过！现在你处于主人模式，可以写文章了。</div>`;
+
+    let extra = '';
+
+    // Passphrase scenarios:
+    if (passphrase) {
+      // Try to fetch+decrypt remote private.json with new passphrase
+      Remote.privateLoaded = false;  // force refetch
+      try {
+        await Remote.fetchPrivate();
+        extra = `已加载远程私密文章 ${Remote.cachePrivate.length} 篇。`;
+      } catch (e) {
+        // Decrypt failed: could be wrong passphrase, OR no remote file yet
+        if (Remote.cachePrivate === null || Remote.cachePrivate.length === 0) {
+          // No remote yet; if we have local privates, push them now
+          const localPrivates = Store.getLocal().filter(a => a.visibility === 'private');
+          if (localPrivates.length > 0) {
+            try {
+              await Store.syncPrivate();
+              extra = `已加密并上传本地的 ${localPrivates.length} 篇私密文章到 GitHub。`;
+            } catch (e2) {
+              extra = `本地私密文章同步失败：${e2.message}`;
+            }
+          } else {
+            extra = '密码已保存（暂无私密文章可同步）。';
+          }
+        } else {
+          extra = '⚠ 远程 data/private.json 存在但解密失败，请检查密码是否正确。';
+        }
+      }
+    } else if (prevPassphrase) {
+      extra = '密码已清除，私密文章将不再同步到 GitHub。';
+    }
+
+    banner.innerHTML = `<div class="banner banner-success">✓ 验证通过！现在你处于主人模式。${extra ? '<br>' + esc(extra) : ''}</div>`;
     syncOwnerUI();
-    // Re-run viewSettings to refresh identity card
-    setTimeout(() => viewSettings(), 800);
+    setTimeout(() => viewSettings(), 1500);
   } catch (err) {
     banner.innerHTML = `<div class="banner banner-error">${esc(err.message)}</div>`;
   }
 }
 
 function logoutOwner() {
-  if (!confirm('登出后将无法再写或发布文章。继续吗？')) return;
+  if (!confirm('登出后将无法再写或发布文章。也会清除本地保存的密码。继续吗？')) return;
   Config.token = '';
+  Config.passphrase = '';
   syncOwnerUI();
   viewSettings();
 }
@@ -822,8 +969,14 @@ async function viewEditor(id) {
   // Visibility hint
   const updateHint = () => {
     const v = document.querySelector('input[name="visibility"]:checked').value;
-    document.getElementById('vis-hint').textContent =
-      v === 'public' ? '将提交到 GitHub，所有人可见' : '只保存在本设备，不会同步到 GitHub';
+    const el = document.getElementById('vis-hint');
+    if (v === 'public') {
+      el.textContent = '将提交到 GitHub，所有人可见';
+    } else if (Config.passphrase) {
+      el.textContent = '将加密同步到 GitHub，仅你（输入密码后）可见';
+    } else {
+      el.textContent = '只存本设备 · 设置密码可跨设备同步';
+    }
   };
   document.querySelectorAll('input[name="visibility"]')
     .forEach(el => el.addEventListener('change', updateHint));
