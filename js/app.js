@@ -119,17 +119,14 @@ function toArticle(d) {
 
 const Store = {
   async getAll() {
+    // Sort client-side to avoid needing Firestore composite indexes.
     try {
-      let q;
-      if (isOwner()) {
-        q = query(collection(db, 'articles'), orderBy('createdAt', 'desc'));
-      } else {
-        q = query(collection(db, 'articles'),
-          where('visibility', '==', 'public'),
-          orderBy('createdAt', 'desc'));
-      }
+      const q = isOwner()
+        ? collection(db, 'articles')
+        : query(collection(db, 'articles'), where('visibility', '==', 'public'));
       const snap = await getDocs(q);
-      return snap.docs.map(toArticle);
+      return snap.docs.map(toArticle).sort(
+        (a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     } catch (e) {
       console.error('getAll failed', e);
       return [];
