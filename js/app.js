@@ -450,6 +450,121 @@ function flashEditorSuccess(msg) {
   setTimeout(() => setEditorBanner(''), 2500);
 }
 
+// ─── In-editor image selection / resize / align ───────────────────
+let selectedImg = null;
+let imgToolbar = null;
+
+function deselectImage() {
+  if (selectedImg) {
+    selectedImg.classList.remove('img-selected');
+    selectedImg = null;
+  }
+  if (imgToolbar) {
+    imgToolbar.remove();
+    imgToolbar = null;
+  }
+}
+
+function selectImage(img) {
+  if (selectedImg === img) return;
+  deselectImage();
+  selectedImg = img;
+  img.classList.add('img-selected');
+  buildImageToolbar();
+  positionImageToolbar();
+}
+
+function buildImageToolbar() {
+  imgToolbar = document.createElement('div');
+  imgToolbar.className = 'img-toolbar';
+  imgToolbar.innerHTML = `
+    <button data-act="size-25" title="25%">25%</button>
+    <button data-act="size-50" title="50%">50%</button>
+    <button data-act="size-75" title="75%">75%</button>
+    <button data-act="size-100" title="100%">100%</button>
+    <span class="itl-sep"></span>
+    <button data-act="align-left"   title="左对齐">左</button>
+    <button data-act="align-center" title="居中">中</button>
+    <button data-act="align-right"  title="右对齐">右</button>
+    <span class="itl-sep"></span>
+    <button data-act="delete" class="itl-del" title="删除">✕</button>
+  `;
+  // Prevent button mousedown from moving focus out of the editor
+  imgToolbar.addEventListener('mousedown', e => e.preventDefault());
+  imgToolbar.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn || !selectedImg) return;
+    handleImgAction(btn.dataset.act);
+    requestAnimationFrame(positionImageToolbar);
+    // Mark editor as dirty so word count / autosave hooks fire
+    const rte = document.getElementById('rte');
+    if (rte) rte.dispatchEvent(new Event('input'));
+  });
+  document.body.appendChild(imgToolbar);
+}
+
+function positionImageToolbar() {
+  if (!imgToolbar || !selectedImg) return;
+  const rect = selectedImg.getBoundingClientRect();
+  const tb = imgToolbar;
+  // Above the image, or below if it'd go off-screen
+  const above = rect.top - 44;
+  const top = above < 8 ? rect.bottom + 8 : above;
+  tb.style.top = `${top}px`;
+  tb.style.left = `${rect.left + rect.width / 2}px`;
+  tb.style.transform = 'translateX(-50%)';
+}
+
+function handleImgAction(act) {
+  const img = selectedImg;
+  if (!img) return;
+  if (act.startsWith('size-')) {
+    const pct = act.slice(5);
+    img.style.width = `${pct}%`;
+    img.style.height = 'auto';
+    img.style.maxWidth = '100%';
+  } else if (act === 'align-left') {
+    img.style.display = 'block';
+    img.style.marginLeft = '0';
+    img.style.marginRight = 'auto';
+  } else if (act === 'align-center') {
+    img.style.display = 'block';
+    img.style.marginLeft = 'auto';
+    img.style.marginRight = 'auto';
+  } else if (act === 'align-right') {
+    img.style.display = 'block';
+    img.style.marginLeft = 'auto';
+    img.style.marginRight = '0';
+  } else if (act === 'delete') {
+    img.remove();
+    deselectImage();
+  }
+}
+
+function attachImageEditor(rte) {
+  rte.addEventListener('click', e => {
+    if (e.target.tagName === 'IMG' && rte.contains(e.target)) {
+      e.preventDefault();
+      selectImage(e.target);
+    } else {
+      deselectImage();
+    }
+  });
+  // Clicks outside editor + toolbar deselect
+  document.addEventListener('mousedown', e => {
+    if (!selectedImg) return;
+    if (e.target === selectedImg) return;
+    if (e.target.closest && e.target.closest('.img-toolbar')) return;
+    if (rte.contains(e.target) && e.target.tagName !== 'IMG') {
+      deselectImage();
+    } else if (!rte.contains(e.target)) {
+      deselectImage();
+    }
+  }, true);
+  window.addEventListener('scroll', positionImageToolbar, true);
+  window.addEventListener('resize', positionImageToolbar);
+}
+
 async function handleImageUpload(file, rteEl) {
   console.log('[image upload] start', { name: file.name, size: file.size, type: file.type });
 
@@ -539,6 +654,8 @@ const ROUTES = [
 let routeGen = 0;
 async function route() {
   if (!authReady) { pendingRoute = true; return; }
+  // Tear down any leftover image-toolbar from the previous view
+  deselectImage();
   const myGen = ++routeGen;
   const path = window.location.hash.replace(/^#/, '') || '/';
   syncNavActive(path);
@@ -1349,6 +1466,9 @@ function initEditor() {
     e.preventDefault();
     document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
   });
+
+  // Click-to-select image + floating size/align toolbar
+  attachImageEditor(rte);
 
   // File picker → image upload
   const fileInput = document.getElementById('image-upload-input');

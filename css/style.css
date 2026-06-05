@@ -619,7 +619,50 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 .rte li { margin-bottom: 0.35rem; }
 .rte a { color: var(--accent); }
 .rte hr { border: none; border-top: 1px solid var(--border); margin: 1.75rem 0; }
-.rte img { max-width: 100%; border-radius: var(--radius-lg); margin: 0.75rem 0; }
+.rte img { max-width: 100%; border-radius: var(--radius-lg); margin: 0.75rem 0; cursor: pointer; }
+.rte img.img-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Floating image toolbar */
+.img-toolbar {
+  position: fixed;
+  z-index: 100;
+  background: #18181b;
+  color: #fff;
+  border-radius: 999px;
+  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.25);
+  white-space: nowrap;
+  font-family: var(--font);
+  animation: fadeUp 0.15s ease both;
+}
+.img-toolbar button {
+  color: inherit;
+  background: transparent;
+  border: none;
+  padding: 0.32rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  min-width: 30px;
+  line-height: 1.2;
+}
+.img-toolbar button:hover { background: rgba(255, 255, 255, 0.15); }
+.img-toolbar .itl-sep {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.2);
+  margin: 0 4px;
+}
+.img-toolbar .itl-del { color: #fca5a5; }
+.img-toolbar .itl-del:hover { background: rgba(220, 38, 38, 0.25); color: #fff; }
 
 .rte-ph {
   position: absolute;
