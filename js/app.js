@@ -472,13 +472,20 @@ async function handleImageUpload(file, rteEl) {
     sel.addRange(range);
   }
 
-  // Create + insert placeholder via direct DOM (more reliable than execCommand)
+  // Create + insert placeholder via direct DOM (more reliable than execCommand).
+  // Note: btoa() can't encode non-Latin1 chars, so we either ASCII-only the SVG
+  // text or url-encode it. We URL-encode to keep the option of i18n later.
   const placeholder = document.createElement('img');
   placeholder.alt = '上传中…';
   placeholder.style.opacity = '0.6';
   placeholder.style.maxWidth = '300px';
-  const phSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180"><rect width="300" height="180" fill="#f5f5f4"/><text x="150" y="92" text-anchor="middle" fill="#71717a" font-family="system-ui,sans-serif" font-size="14" dominant-baseline="middle">上传中…</text></svg>');
-  placeholder.src = `data:image/svg+xml;base64,${phSvg}`;
+  const phSvg = encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180">' +
+    '<rect width="300" height="180" fill="#f5f5f4"/>' +
+    '<text x="150" y="92" text-anchor="middle" fill="#71717a" ' +
+    'font-family="system-ui,sans-serif" font-size="14" ' +
+    'dominant-baseline="middle">Uploading...</text></svg>');
+  placeholder.src = `data:image/svg+xml;utf8,${phSvg}`;
 
   range.deleteContents();
   range.insertNode(placeholder);
