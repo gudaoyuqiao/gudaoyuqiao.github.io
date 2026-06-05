@@ -12,6 +12,46 @@
   --accent-hover: #1e40af;
   --danger: #b91c1c;
   --danger-bg: #fef2f2;
+  --code-bg: #18181b;
+  --code-fg: #f4f4f5;
+  --nav-blur-bg: rgba(255, 255, 255, 0.88);
+  --pre-bg: #18181b;
+  --pre-fg: #f4f4f5;
+  --hit-bg: #fde68a;
+  --hit-fg: #18181b;
+
+  color-scheme: light;
+}
+
+/* Dark theme */
+:root[data-theme="dark"] {
+  --bg: #0c0c0d;
+  --surface: #18181b;
+  --border: #2a2a2e;
+  --border-light: #1f1f23;
+  --text: #ededee;
+  --text-sec: #a1a1aa;
+  --text-muted: #71717a;
+  --accent: #93c5fd;
+  --accent-bg: rgba(147, 197, 253, 0.1);
+  --accent-hover: #bfdbfe;
+  --danger: #fca5a5;
+  --danger-bg: rgba(252, 165, 165, 0.08);
+  --code-bg: #ededee;
+  --code-fg: #0c0c0d;
+  --nav-blur-bg: rgba(12, 12, 13, 0.85);
+  --pre-bg: #1f1f23;
+  --pre-fg: #ededee;
+  --hit-bg: #facc15;
+  --hit-fg: #18181b;
+
+  color-scheme: dark;
+}
+
+/* Smooth transition when toggling */
+html { transition: background-color 0.2s ease; }
+body { transition: background-color 0.2s ease, color 0.2s ease; }
+.navbar, .card, .tag, .btn, .icon-btn { transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease; }
   --radius: 4px;
   --radius-lg: 8px;
   --shadow: 0 6px 24px rgba(15, 23, 42, 0.06);
@@ -67,7 +107,7 @@ button { font-family: var(--font); background: none; border: none; cursor: point
   top: 0;
   z-index: 50;
   height: var(--nav-h);
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--nav-blur-bg);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
@@ -144,6 +184,11 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 }
 .icon-btn:hover { background: var(--surface); color: var(--text); }
 
+/* Theme toggle: show moon in light mode, sun in dark mode */
+.theme-icon-dark { display: none; }
+:root[data-theme="dark"] .theme-icon-light { display: none; }
+:root[data-theme="dark"] .theme-icon-dark { display: block; }
+
 /* ─── Buttons ──────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
@@ -164,10 +209,10 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 
 .btn-primary {
   background: var(--text);
-  color: #fff;
+  color: var(--bg);
   border-color: var(--text);
 }
-.btn-primary:hover { background: #27272a; border-color: #27272a; }
+.btn-primary:hover { opacity: 0.85; }
 
 .btn-ghost {
   background: transparent;
@@ -442,8 +487,8 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 }
 
 .art-body pre {
-  background: #18181b;
-  color: #f4f4f5;
+  background: var(--pre-bg);
+  color: var(--pre-fg);
   padding: 1.25rem 1.5rem;
   border-radius: var(--radius-lg);
   overflow-x: auto;
@@ -617,6 +662,29 @@ button { font-family: var(--font); background: none; border: none; cursor: point
   font-style: normal;
   letter-spacing: 0.08em;
 }
+.archive-month-group {
+  margin-bottom: 1.5rem;
+}
+.archive-month-group:last-child { margin-bottom: 0; }
+.archive-month {
+  font-family: var(--font);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 1rem 0 0.5rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.archive-month-count {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 400;
+  letter-spacing: 0.08em;
+}
+
 .archive-item {
   display: flex;
   align-items: baseline;
@@ -664,10 +732,10 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 }
 .tag-cloud-item:hover {
   background: var(--text);
-  color: #fff;
+  color: var(--bg);
   border-color: var(--text);
 }
-.tag-cloud-item:hover .tag-cloud-count { color: rgba(255, 255, 255, 0.6); }
+.tag-cloud-item:hover .tag-cloud-count { color: var(--text-muted); opacity: 0.7; }
 .tag-cloud-count {
   font-size: 0.78rem;
   color: var(--text-muted);
@@ -728,7 +796,7 @@ button { font-family: var(--font); background: none; border: none; cursor: point
   position: relative;
   width: 100%;
   max-width: 580px;
-  background: #fff;
+  background: var(--bg);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-md);
   overflow: hidden;
@@ -798,7 +866,7 @@ button { font-family: var(--font); background: none; border: none; cursor: point
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
 }
-.search-hit { background: #fde68a; color: var(--text); padding: 0 2px; border-radius: 2px; }
+.search-hit { background: var(--hit-bg); color: var(--hit-fg); padding: 0 2px; border-radius: 2px; }
 
 /* ─── Footer ───────────────────────────────────────────────────── */
 .site-footer {

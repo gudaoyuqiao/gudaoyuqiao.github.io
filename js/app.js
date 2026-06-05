@@ -135,9 +135,12 @@ const Store = {
 
   async get(id) {
     try {
-      const d = await getDoc(doc(db, 'articles', id));
+      const d = await Promise.race([
+        getDoc(doc(db, 'articles', id)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('请求超时（10s）')), 10000)),
+      ]);
       return d.exists() ? toArticle(d) : null;
-    } catch (e) { console.error(e); return null; }
+    } catch (e) { console.error('Store.get failed', e); return null; }
   },
 
   async create(a) {
@@ -361,8 +364,10 @@ const ROUTES = [
   [/^\/settings$/,          () => viewSettings()],
 ];
 
+let routeGen = 0;
 async function route() {
   if (!authReady) { pendingRoute = true; return; }
+  const myGen = ++routeGen;
   const path = window.location.hash.replace(/^#/, '') || '/';
   syncNavActive(path);
   updateAuthUI();
@@ -373,7 +378,10 @@ async function route() {
       try {
         app.innerHTML = `<div class="loading">加载中…</div>`;
         await fn(m);
+        // If a newer navigation happened, abandon further DOM writes from this one
+        if (myGen !== routeGen) return;
       } catch (err) {
+        if (myGen !== routeGen) return;
         console.error(err);
         app.innerHTML = `
           <div class="error-page">
@@ -386,6 +394,7 @@ async function route() {
       return;
     }
   }
+  if (myGen !== routeGen) return;
   app.innerHTML = `<div class="error-page"><h2>页面不存在</h2><a href="#/">← 返回首页</a></div>`;
 }
 
@@ -401,8 +410,24 @@ function syncNavActive(path) {
   });
 }
 
+// ─── Theme ───────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  document.documentElement.dataset.theme = theme;
+  document.getElementById('theme-btn').addEventListener('click', toggleTheme);
+}
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme;
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('theme', next);
+}
+
 window.addEventListener('hashchange', route);
 window.addEventListener('load', async () => {
+  initTheme();
   document.getElementById('nav-brand').textContent = SITE.title;
   document.getElementById('footer-brand').textContent = SITE.title;
   initSearch();
@@ -736,22 +761,40 @@ async function viewArchive() {
     return;
   }
 
-  const byYear = new Map();
+  const byYearMonth = new Map();
   articles.forEach(a => {
-    const y = new Date(a.createdAt).getFullYear();
-    if (!byYear.has(y)) byYear.set(y, []);
-    byYear.get(y).push(a);
+    const d = new Date(a.createdAt);
+    const y = d.getFullYear();
+    const m = d.getMonth(); // 0-indexed
+    if (!byYearMonth.has(y)) byYearMonth.set(y, new Map());
+    if (!byYearMonth.get(y).has(m)) byYearMonth.get(y).set(m, []);
+    byYearMonth.get(y).get(m).push(a);
   });
 
-  const groups = [...byYear.entries()].map(([year, list]) => `
-    <section class="archive-group">
-      <h2 class="archive-year">${year}<span class="archive-year-count">${list.length} 篇</span></h2>
-      ${list.map(a => `
-        <div class="archive-item" onclick="go('/article/${a.id}')">
-          <span class="archive-date">${fmtDate(a.createdAt, true)}</span>
-          <span class="archive-item-title">${esc(a.title)}${lockBadge(a.visibility)}</span>
-        </div>`).join('')}
-    </section>`).join('');
+  const sortedYears = [...byYearMonth.keys()].sort((a, b) => b - a);
+
+  const groups = sortedYears.map(year => {
+    const monthMap = byYearMonth.get(year);
+    const yearTotal = [...monthMap.values()].reduce((s, list) => s + list.length, 0);
+    const sortedMonths = [...monthMap.keys()].sort((a, b) => b - a);
+    const monthsHtml = sortedMonths.map(monthIdx => {
+      const list = monthMap.get(monthIdx);
+      return `
+        <div class="archive-month-group">
+          <h3 class="archive-month">${monthIdx + 1} 月<span class="archive-month-count">${list.length}</span></h3>
+          ${list.map(a => `
+            <div class="archive-item" onclick="go('/article/${a.id}')">
+              <span class="archive-date">${String(monthIdx + 1).padStart(2, '0')}-${String(new Date(a.createdAt).getDate()).padStart(2, '0')}</span>
+              <span class="archive-item-title">${esc(a.title)}${lockBadge(a.visibility)}</span>
+            </div>`).join('')}
+        </div>`;
+    }).join('');
+    return `
+      <section class="archive-group">
+        <h2 class="archive-year">${year}<span class="archive-year-count">${yearTotal} 篇</span></h2>
+        ${monthsHtml}
+      </section>`;
+  }).join('');
 
   app.innerHTML = `
     <div class="page-archive">
