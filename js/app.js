@@ -22,6 +22,14 @@ const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
 const githubProvider = new GithubAuthProvider();
+// Request scope needed to push images to the blog's repo.
+githubProvider.addScope('public_repo');
+
+// Repo where uploaded images get stored. Same as the blog repo.
+const IMG_REPO_OWNER = 'gudaoyuqiao';
+const IMG_REPO_NAME  = 'gudaoyuqiao.github.io';
+const IMG_REPO_BRANCH = 'main';
+const IMG_DIR = 'data/images';
 
 // Owner Firebase UID — must match Firestore security rules.
 // Knowing this is not a security risk; rules enforce it server-side.
@@ -83,7 +91,13 @@ function updateAuthUI() {
 
 async function loginWithGithub() {
   try {
-    await signInWithPopup(auth, githubProvider);
+    const result = await signInWithPopup(auth, githubProvider);
+    // Capture GitHub OAuth access token for image uploads. It's the only
+    // moment we can get it; Firebase doesn't expose it again later.
+    const credential = GithubAuthProvider.credentialFromResult(result);
+    if (credential?.accessToken) {
+      localStorage.setItem('gh_access_token', credential.accessToken);
+    }
   } catch (e) {
     if (e.code === 'auth/popup-closed-by-user' ||
         e.code === 'auth/cancelled-popup-request') return;
@@ -96,6 +110,7 @@ async function loginWithGithub() {
 
 async function logoutAction() {
   if (!confirm('确定要登出吗？')) return;
+  localStorage.removeItem('gh_access_token');
   await signOut(auth);
   go('/');
 }
@@ -346,6 +361,103 @@ function lockBadge(visibility) {
 
 function canEdit(article) {
   return isOwner() && article.authorUid === currentUser.uid;
+}
+
+// ─── Image upload (compress → push to GitHub repo) ────────────────
+function compressImage(file, maxDim = 1600, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const ratio = width / height;
+        if (width >= height) { width = maxDim; height = Math.round(maxDim / ratio); }
+        else                 { height = maxDim; width = Math.round(maxDim * ratio); }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        blob => blob ? resolve(blob) : reject(new Error('压缩失败')),
+        'image/jpeg', quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(img.src); reject(new Error('图片读取失败')); };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function uploadImageToGithub(blob) {
+  const token = localStorage.getItem('gh_access_token');
+  if (!token) {
+    throw new Error('GitHub 写入权限未授予 → 请去「设置」登出后重新登录一次');
+  }
+
+  const base64 = await blobToBase64(blob);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const random = Math.random().toString(36).slice(2, 8);
+  const filename = `${ts}_${random}.jpg`;
+  const path = `${IMG_DIR}/${filename}`;
+
+  const r = await fetch(
+    `https://api.github.com/repos/${IMG_REPO_OWNER}/${IMG_REPO_NAME}/contents/${path}`,
+    {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: `Add image ${filename}`,
+        content: base64,
+        branch: IMG_REPO_BRANCH,
+      }),
+    });
+
+  if (!r.ok) {
+    const t = await r.text();
+    let hint = '';
+    if (r.status === 401)      hint = ' Token 无效，请登出后重新登录。';
+    else if (r.status === 403) hint = ' Token 缺少 public_repo 权限，请登出后重新登录。';
+    else if (r.status === 404) hint = ' 仓库不存在或路径错误。';
+    throw new Error(`上传失败 (${r.status}).${hint} ${t.slice(0, 100)}`);
+  }
+
+  // Use raw.githubusercontent.com — instant (skips Pages build wait)
+  return `https://raw.githubusercontent.com/${IMG_REPO_OWNER}/${IMG_REPO_NAME}/${IMG_REPO_BRANCH}/${path}`;
+}
+
+async function handleImageUpload(file, rteEl) {
+  const placeholderId = `up-${Date.now().toString(36)}`;
+  const phSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180" viewBox="0 0 300 180"><rect width="300" height="180" fill="#f5f5f4"/><text x="150" y="92" text-anchor="middle" fill="#71717a" font-family="system-ui,sans-serif" font-size="14" dominant-baseline="middle">上传中…</text></svg>');
+  document.execCommand('insertHTML', false,
+    `<img id="${placeholderId}" alt="上传中…" src="data:image/svg+xml;base64,${phSvg}" style="opacity:0.7;max-width:300px">`);
+
+  try {
+    const blob = await compressImage(file);
+    const url = await uploadImageToGithub(blob);
+    const ph = document.getElementById(placeholderId);
+    if (ph) ph.outerHTML = `<img src="${url}" alt="">`;
+    if (rteEl) rteEl.dispatchEvent(new Event('input'));
+  } catch (err) {
+    const ph = document.getElementById(placeholderId);
+    if (ph) ph.remove();
+    alert(err.message);
+  }
 }
 
 // ─── Router ───────────────────────────────────────────────────────
@@ -931,10 +1043,16 @@ function viewSettings() {
     const owner = isOwner();
     const roleLabel = owner ? '主人模式' : '已登录访客';
     const dotClass = owner ? 'owner' : 'visitor';
+    const hasRepoToken = !!localStorage.getItem('gh_access_token');
     const description = owner
       ? `<p class="settings-help">
             可以写、改、删自己的文章。可见性「公开」对所有访客可见；「仅自己」只有你登录后能看到。
             权限隔离由 Firebase 服务器强制，访客即使打开浏览器开发者工具也绕不过。
+          </p>
+          <p class="settings-help" style="margin-top:1rem">
+            <b>图片上传权限</b>：${hasRepoToken
+              ? '<span style="color:#16a34a">✓ 已授予</span>（编辑器里点 🖼 按钮可以从本地选图片上传）'
+              : '<span style="color:#dc2626">✗ 未授予</span>。当前 GitHub 登录不带仓库写入 scope，需要<b>登出后重新登录一次</b>，授权时勾选 public_repo 权限。'}
           </p>`
       : `<p class="settings-help">
             你已登录，但不是这个博客的拥有者。可以读公开文章，但无法写入。
@@ -1101,6 +1219,8 @@ async function viewEditor(id) {
         </div>
       </div>
 
+      <input type="file" id="image-upload-input" accept="image/*" style="display:none">
+
       <div class="editor-footer"><span id="word-count" class="word-count">0 字</span></div>
       <div id="editor-banner"></div>
     </div>`;
@@ -1152,8 +1272,9 @@ function initEditor() {
       const url = prompt('请输入链接地址：', 'https://');
       if (url && url.trim()) document.execCommand('createLink', false, url.trim());
     } else if (cmd === 'image') {
-      const url = prompt('请输入图片链接地址：', 'https://');
-      if (url && url.trim()) document.execCommand('insertImage', false, url.trim());
+      // Trigger file picker (works on PC and mobile — mobile shows 拍照/相册)
+      const input = document.getElementById('image-upload-input');
+      if (input) input.click();
     } else if (cmd === 'hr')           document.execCommand('insertHTML', false, '<hr>');
     else                                document.execCommand(cmd, false, null);
     rte.focus();
@@ -1168,6 +1289,20 @@ function initEditor() {
     e.preventDefault();
     document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
   });
+
+  // File picker → image upload
+  const fileInput = document.getElementById('image-upload-input');
+  if (fileInput) {
+    fileInput.addEventListener('change', async e => {
+      const file = e.target.files[0];
+      e.target.value = ''; // reset so same file can be picked again
+      if (!file) return;
+      rte.focus(); // ensure caret in editor for insertHTML to work
+      await handleImageUpload(file, rte);
+      updateCount();
+      checkEmpty();
+    });
+  }
 
   updateCount();
   requestAnimationFrame(checkEmpty);
