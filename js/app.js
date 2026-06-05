@@ -441,22 +441,75 @@ async function uploadImageToGithub(blob) {
   return `https://raw.githubusercontent.com/${IMG_REPO_OWNER}/${IMG_REPO_NAME}/${IMG_REPO_BRANCH}/${path}`;
 }
 
+function setEditorBanner(html) {
+  const b = document.getElementById('editor-banner');
+  if (b) b.innerHTML = html;
+}
+function flashEditorSuccess(msg) {
+  setEditorBanner(`<div class="banner banner-success">${esc(msg)}</div>`);
+  setTimeout(() => setEditorBanner(''), 2500);
+}
+
 async function handleImageUpload(file, rteEl) {
-  const placeholderId = `up-${Date.now().toString(36)}`;
-  const phSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180" viewBox="0 0 300 180"><rect width="300" height="180" fill="#f5f5f4"/><text x="150" y="92" text-anchor="middle" fill="#71717a" font-family="system-ui,sans-serif" font-size="14" dominant-baseline="middle">上传中…</text></svg>');
-  document.execCommand('insertHTML', false,
-    `<img id="${placeholderId}" alt="上传中…" src="data:image/svg+xml;base64,${phSvg}" style="opacity:0.7;max-width:300px">`);
+  console.log('[image upload] start', { name: file.name, size: file.size, type: file.type });
+
+  if (!localStorage.getItem('gh_access_token')) {
+    setEditorBanner(`<div class="banner banner-error">GitHub 写入权限未授予 → 去「设置」登出后重新登录一次，重新授权时勾选 public_repo</div>`);
+    console.error('[image upload] missing gh_access_token');
+    return;
+  }
+
+  // Get a valid range inside the editor for insertion
+  const sel = window.getSelection();
+  let range = null;
+  if (sel && sel.rangeCount > 0 && rteEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+    range = sel.getRangeAt(0);
+  } else {
+    range = document.createRange();
+    range.selectNodeContents(rteEl);
+    range.collapse(false); // end of editor
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // Create + insert placeholder via direct DOM (more reliable than execCommand)
+  const placeholder = document.createElement('img');
+  placeholder.alt = '上传中…';
+  placeholder.style.opacity = '0.6';
+  placeholder.style.maxWidth = '300px';
+  const phSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180"><rect width="300" height="180" fill="#f5f5f4"/><text x="150" y="92" text-anchor="middle" fill="#71717a" font-family="system-ui,sans-serif" font-size="14" dominant-baseline="middle">上传中…</text></svg>');
+  placeholder.src = `data:image/svg+xml;base64,${phSvg}`;
+
+  range.deleteContents();
+  range.insertNode(placeholder);
+  range.setStartAfter(placeholder);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  setEditorBanner(`<div class="banner banner-info">压缩中…</div>`);
 
   try {
+    console.log('[image upload] compressing');
     const blob = await compressImage(file);
+    console.log('[image upload] compressed', { size: blob.size, type: blob.type });
+
+    setEditorBanner(`<div class="banner banner-info">上传到 GitHub… (${Math.round(blob.size/1024)} KB)</div>`);
+    console.log('[image upload] uploading to GitHub');
     const url = await uploadImageToGithub(blob);
-    const ph = document.getElementById(placeholderId);
-    if (ph) ph.outerHTML = `<img src="${url}" alt="">`;
+    console.log('[image upload] uploaded', url);
+
+    const realImg = document.createElement('img');
+    realImg.src = url;
+    realImg.alt = '';
+    placeholder.replaceWith(realImg);
+    flashEditorSuccess('✓ 图片已插入');
+
     if (rteEl) rteEl.dispatchEvent(new Event('input'));
   } catch (err) {
-    const ph = document.getElementById(placeholderId);
-    if (ph) ph.remove();
-    alert(err.message);
+    console.error('[image upload] failed', err);
+    placeholder.remove();
+    setEditorBanner(`<div class="banner banner-error">上传失败：${esc(err.message)}</div>`);
   }
 }
 
