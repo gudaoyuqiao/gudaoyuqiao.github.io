@@ -623,6 +623,45 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 .rte img.img-selected {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
+  touch-action: none; /* allow touch-drag of a selected image without scrolling */
+}
+.rte img.img-dragging { opacity: 0.35; }
+
+/* Corner resize handles */
+.img-handle {
+  position: fixed;
+  z-index: 101;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  touch-action: none;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.3);
+}
+.img-handle[data-corner="nw"], .img-handle[data-corner="se"] { cursor: nwse-resize; }
+.img-handle[data-corner="ne"], .img-handle[data-corner="sw"] { cursor: nesw-resize; }
+
+/* Drop position indicator while dragging an image */
+.img-drop-indicator {
+  position: fixed;
+  z-index: 101;
+  height: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+/* Ghost thumbnail following the pointer */
+.img-drag-ghost {
+  position: fixed;
+  z-index: 102;
+  width: 90px;
+  border-radius: 6px;
+  opacity: 0.8;
+  pointer-events: none;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.35);
+  transform: translate(-50%, -50%);
 }
 
 /* Floating image toolbar */

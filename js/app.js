@@ -450,9 +450,10 @@ function flashEditorSuccess(msg) {
   setTimeout(() => setEditorBanner(''), 2500);
 }
 
-// ─── In-editor image selection / resize / align ───────────────────
+// ─── In-editor image selection / resize / align / drag ────────────
 let selectedImg = null;
 let imgToolbar = null;
+let imgHandles = [];
 
 function deselectImage() {
   if (selectedImg) {
@@ -463,6 +464,8 @@ function deselectImage() {
     imgToolbar.remove();
     imgToolbar = null;
   }
+  imgHandles.forEach(h => h.remove());
+  imgHandles = [];
 }
 
 function selectImage(img) {
@@ -471,6 +474,148 @@ function selectImage(img) {
   selectedImg = img;
   img.classList.add('img-selected');
   buildImageToolbar();
+  buildImageHandles();
+  positionImageToolbar();
+}
+
+// ── Corner resize handles ──
+function buildImageHandles() {
+  ['nw', 'ne', 'sw', 'se'].forEach(corner => {
+    const h = document.createElement('div');
+    h.className = 'img-handle';
+    h.dataset.corner = corner;
+    h.addEventListener('pointerdown', startHandleResize);
+    document.body.appendChild(h);
+    imgHandles.push(h);
+  });
+}
+
+function positionImageHandles() {
+  if (!selectedImg || !imgHandles.length) return;
+  const r = selectedImg.getBoundingClientRect();
+  const pos = {
+    nw: [r.left, r.top], ne: [r.right, r.top],
+    sw: [r.left, r.bottom], se: [r.right, r.bottom],
+  };
+  imgHandles.forEach(h => {
+    const [x, y] = pos[h.dataset.corner];
+    h.style.left = `${x - 7}px`;
+    h.style.top = `${y - 7}px`;
+  });
+}
+
+function startHandleResize(e) {
+  if (!selectedImg) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const img = selectedImg;
+  const corner = e.currentTarget.dataset.corner;
+  const startX = e.clientX;
+  const startW = img.getBoundingClientRect().width;
+  const rte = document.getElementById('rte');
+  const maxW = rte ? rte.getBoundingClientRect().width - 1 : 1200;
+  const handle = e.currentTarget;
+  handle.setPointerCapture(e.pointerId);
+
+  const onMove = ev => {
+    // Left-side handles grow when dragging left
+    const dir = corner === 'ne' || corner === 'se' ? 1 : -1;
+    const newW = Math.min(maxW, Math.max(48, startW + dir * (ev.clientX - startX)));
+    img.style.width = `${Math.round(newW)}px`;
+    img.style.height = 'auto';
+    img.style.maxWidth = '100%';
+    positionImageToolbar();
+  };
+  const onUp = () => {
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onUp);
+    handle.removeEventListener('pointercancel', onUp);
+    // Persist as percentage of editor width → responsive across devices
+    if (rte) {
+      const pct = (img.getBoundingClientRect().width / rte.getBoundingClientRect().width) * 100;
+      img.style.width = `${Math.min(100, Math.max(5, pct)).toFixed(1)}%`;
+    }
+    positionImageToolbar();
+    if (rte) rte.dispatchEvent(new Event('input'));
+  };
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onUp);
+}
+
+// ── Drag image to reposition ──
+let dragState = null;
+
+function caretRangeAtPoint(x, y) {
+  if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+  if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    if (!p) return null;
+    const r = document.createRange();
+    r.setStart(p.offsetNode, p.offset);
+    r.collapse(true);
+    return r;
+  }
+  return null;
+}
+
+function startImageDrag(img, rte, e) {
+  const ghost = document.createElement('img');
+  ghost.src = img.src;
+  ghost.className = 'img-drag-ghost';
+  document.body.appendChild(ghost);
+
+  const indicator = document.createElement('div');
+  indicator.className = 'img-drop-indicator';
+  indicator.style.display = 'none';
+  document.body.appendChild(indicator);
+
+  img.classList.add('img-dragging');
+  img.style.pointerEvents = 'none'; // so caretRangeFromPoint sees beneath it
+
+  dragState = { img, rte, ghost, indicator, range: null };
+  moveImageDrag(e);
+}
+
+function moveImageDrag(e) {
+  if (!dragState) return;
+  const { ghost, indicator, rte } = dragState;
+  ghost.style.left = `${e.clientX}px`;
+  ghost.style.top = `${e.clientY}px`;
+
+  const range = caretRangeAtPoint(e.clientX, e.clientY);
+  if (range && rte.contains(range.startContainer)) {
+    dragState.range = range;
+    const rect = range.getBoundingClientRect();
+    const rteRect = rte.getBoundingClientRect();
+    // Zero-width caret rect → draw a short horizontal line at that spot
+    const y = rect.top || e.clientY;
+    indicator.style.display = 'block';
+    indicator.style.left = `${rteRect.left + 8}px`;
+    indicator.style.width = `${rteRect.width - 16}px`;
+    indicator.style.top = `${(rect.bottom || y)}px`;
+  } else {
+    dragState.range = null;
+    indicator.style.display = 'none';
+  }
+}
+
+function endImageDrag() {
+  if (!dragState) return;
+  const { img, rte, ghost, indicator, range } = dragState;
+  ghost.remove();
+  indicator.remove();
+  img.classList.remove('img-dragging');
+  img.style.pointerEvents = '';
+
+  if (range && rte.contains(range.startContainer)) {
+    // Don't drop into itself
+    if (!(range.startContainer === img || img.contains(range.startContainer))) {
+      range.insertNode(img);
+      rte.dispatchEvent(new Event('input'));
+    }
+  }
+  dragState = null;
   positionImageToolbar();
 }
 
@@ -504,15 +649,18 @@ function buildImageToolbar() {
 }
 
 function positionImageToolbar() {
-  if (!imgToolbar || !selectedImg) return;
-  const rect = selectedImg.getBoundingClientRect();
-  const tb = imgToolbar;
-  // Above the image, or below if it'd go off-screen
-  const above = rect.top - 44;
-  const top = above < 8 ? rect.bottom + 8 : above;
-  tb.style.top = `${top}px`;
-  tb.style.left = `${rect.left + rect.width / 2}px`;
-  tb.style.transform = 'translateX(-50%)';
+  if (!selectedImg) return;
+  if (imgToolbar) {
+    const rect = selectedImg.getBoundingClientRect();
+    const tb = imgToolbar;
+    // Above the image, or below if it'd go off-screen
+    const above = rect.top - 44;
+    const top = above < 8 ? rect.bottom + 8 : above;
+    tb.style.top = `${top}px`;
+    tb.style.left = `${rect.left + rect.width / 2}px`;
+    tb.style.transform = 'translateX(-50%)';
+  }
+  positionImageHandles();
 }
 
 function handleImgAction(act) {
@@ -542,19 +690,50 @@ function handleImgAction(act) {
 }
 
 function attachImageEditor(rte) {
-  rte.addEventListener('click', e => {
-    if (e.target.tagName === 'IMG' && rte.contains(e.target)) {
-      e.preventDefault();
-      selectImage(e.target);
-    } else {
-      deselectImage();
-    }
+  // Kill native browser image drag (we implement our own)
+  rte.addEventListener('dragstart', e => {
+    if (e.target.tagName === 'IMG') e.preventDefault();
   });
+
+  // Pointer-based: tap selects; press-and-move on a selected image drags it
+  rte.addEventListener('pointerdown', e => {
+    if (e.target.tagName !== 'IMG' || !rte.contains(e.target)) return;
+    const img = e.target;
+    const startX = e.clientX, startY = e.clientY;
+    const wasSelected = (selectedImg === img);
+    let dragging = false;
+
+    const onMove = ev => {
+      if (!dragging &&
+          Math.hypot(ev.clientX - startX, ev.clientY - startY) > 8 &&
+          wasSelected) {
+        dragging = true;
+        startImageDrag(img, rte, ev);
+      }
+      if (dragging) moveImageDrag(ev);
+    };
+    const onUp = ev => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      if (dragging) {
+        endImageDrag();
+        selectImage(img); // keep it selected after the move
+        ev.preventDefault();
+      } else {
+        selectImage(img);
+      }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  });
+
   // Clicks outside editor + toolbar deselect
   document.addEventListener('mousedown', e => {
     if (!selectedImg) return;
     if (e.target === selectedImg) return;
-    if (e.target.closest && e.target.closest('.img-toolbar')) return;
+    if (e.target.closest && (e.target.closest('.img-toolbar') || e.target.closest('.img-handle'))) return;
     if (rte.contains(e.target) && e.target.tagName !== 'IMG') {
       deselectImage();
     } else if (!rte.contains(e.target)) {
