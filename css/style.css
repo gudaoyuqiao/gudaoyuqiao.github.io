@@ -620,6 +620,8 @@ button { font-family: var(--font); background: none; border: none; cursor: point
 .rte a { color: var(--accent); }
 .rte hr { border: none; border-top: 1px solid var(--border); margin: 1.75rem 0; }
 .rte img { max-width: 100%; border-radius: var(--radius-lg); margin: 0.75rem 0; cursor: pointer; }
+/* Contain floated (text-wrapped) images */
+.rte::after, .art-body::after { content: ""; display: table; clear: both; }
 .rte img.img-selected {
   outline: 2px solid var(--accent);
   outline-offset: 3px;

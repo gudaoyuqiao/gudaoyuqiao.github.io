@@ -586,23 +586,49 @@ function moveImageDrag(e) {
   const range = caretRangeAtPoint(e.clientX, e.clientY);
   if (range && rte.contains(range.startContainer)) {
     dragState.range = range;
-    const rect = range.getBoundingClientRect();
     const rteRect = rte.getBoundingClientRect();
-    // Zero-width caret rect → draw a short horizontal line at that spot
-    const y = rect.top || e.clientY;
+    // Horizontal zone decides wrap alignment: left / center / right
+    const relX = (e.clientX - rteRect.left) / rteRect.width;
+    const zone = relX < 0.33 ? 'left' : relX > 0.67 ? 'right' : 'center';
+    dragState.zone = zone;
+
+    // Indicator: a short line in the chosen third previews drop spot + alignment
+    const rect = range.getBoundingClientRect();
+    const y = rect.bottom || e.clientY;
+    const third = (rteRect.width - 16) / 3;
     indicator.style.display = 'block';
-    indicator.style.left = `${rteRect.left + 8}px`;
-    indicator.style.width = `${rteRect.width - 16}px`;
-    indicator.style.top = `${(rect.bottom || y)}px`;
+    indicator.style.top = `${y}px`;
+    indicator.style.width = `${third}px`;
+    indicator.style.left =
+      zone === 'left'  ? `${rteRect.left + 8}px` :
+      zone === 'right' ? `${rteRect.left + 8 + 2 * third}px` :
+                         `${rteRect.left + 8 + third}px`;
   } else {
     dragState.range = null;
     indicator.style.display = 'none';
   }
 }
 
+// Apply text-wrap layout for a drop zone: left/right float (文字环绕) or centered block
+function applyImageZone(img, zone) {
+  img.style.float = '';
+  img.style.display = '';
+  img.style.margin = '';
+  if (zone === 'left') {
+    img.style.float = 'left';
+    img.style.margin = '0.4rem 1.25rem 0.6rem 0';
+  } else if (zone === 'right') {
+    img.style.float = 'right';
+    img.style.margin = '0.4rem 0 0.6rem 1.25rem';
+  } else {
+    img.style.display = 'block';
+    img.style.margin = '0.75rem auto';
+  }
+}
+
 function endImageDrag() {
   if (!dragState) return;
-  const { img, rte, ghost, indicator, range } = dragState;
+  const { img, rte, ghost, indicator, range, zone } = dragState;
   ghost.remove();
   indicator.remove();
   img.classList.remove('img-dragging');
@@ -612,6 +638,7 @@ function endImageDrag() {
     // Don't drop into itself
     if (!(range.startContainer === img || img.contains(range.startContainer))) {
       range.insertNode(img);
+      applyImageZone(img, zone || 'center');
       rte.dispatchEvent(new Event('input'));
     }
   }
@@ -672,17 +699,11 @@ function handleImgAction(act) {
     img.style.height = 'auto';
     img.style.maxWidth = '100%';
   } else if (act === 'align-left') {
-    img.style.display = 'block';
-    img.style.marginLeft = '0';
-    img.style.marginRight = 'auto';
+    applyImageZone(img, 'left');
   } else if (act === 'align-center') {
-    img.style.display = 'block';
-    img.style.marginLeft = 'auto';
-    img.style.marginRight = 'auto';
+    applyImageZone(img, 'center');
   } else if (act === 'align-right') {
-    img.style.display = 'block';
-    img.style.marginLeft = 'auto';
-    img.style.marginRight = '0';
+    applyImageZone(img, 'right');
   } else if (act === 'delete') {
     img.remove();
     deselectImage();
