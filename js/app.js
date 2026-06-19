@@ -127,6 +127,7 @@ function toArticle(d) {
     visibility: data.visibility || 'public',
     authorUid:  data.authorUid || '',
     authorName: data.authorName || '',
+    authorPhoto:data.authorPhoto || '',
     createdAt:  toIso(data.createdAt),
     updatedAt:  toIso(data.updatedAt),
   };
@@ -167,6 +168,7 @@ const Store = {
       visibility: a.visibility || 'public',
       authorUid:  currentUser.uid,
       authorName: currentUser.displayName || currentUser.providerData[0]?.displayName || 'Owner',
+      authorPhoto: currentUser.photoURL || '',
       createdAt:  serverTimestamp(),
       updatedAt:  serverTimestamp(),
     };
@@ -336,6 +338,20 @@ function stripTags(html) {
 function excerpt(html, max = 140) {
   const t = stripTags(html).trim();
   return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+function firstImage(html) {
+  const d = document.createElement('div');
+  d.innerHTML = html;
+  const img = d.querySelector('img');
+  return img ? img.getAttribute('src') : null;
+}
+
+// Avatar inner content for an article author: photo if available, else initial
+function authorAvatarInner(a) {
+  if (a.authorPhoto) return `<img src="${esc(a.authorPhoto)}" alt="">`;
+  const initial = (a.authorName || '?').trim().charAt(0).toUpperCase();
+  return esc(initial);
 }
 
 function readingTime(html) {
@@ -952,22 +968,28 @@ async function viewHome() {
     return;
   }
 
-  const cards = articles.map(a => `
+  const cards = articles.map(a => {
+    const thumb = firstImage(a.content);
+    return `
     <article class="card" onclick="go('/article/${a.id}')">
-      <h2 class="card-title">${esc(a.title)}${lockBadge(a.visibility)}</h2>
-      <p class="card-excerpt">${esc(excerpt(a.content))}</p>
-      <div class="card-meta">
-        <span class="meta-date">${fmtDate(a.createdAt)}</span>
-        <span class="meta-dot"></span>
-        <span class="meta-read">${readingTime(a.content)}</span>
-        ${(a.tags || []).length ? `<span class="meta-dot"></span>` : ''}
-        ${(a.tags || []).length
-          ? `<div class="tag-list" onclick="event.stopPropagation()">
-               ${a.tags.map(t => `<span class="tag" onclick="go('/tag/${encodeURIComponent(t)}')">${esc(t)}</span>`).join('')}
-             </div>`
-          : ''}
+      <div class="card-text">
+        <h2 class="card-title">${esc(a.title)}${lockBadge(a.visibility)}</h2>
+        <p class="card-excerpt">${esc(excerpt(a.content))}</p>
+        <div class="card-meta">
+          <span class="meta-date">${fmtDate(a.createdAt)}</span>
+          <span class="meta-dot"></span>
+          <span class="meta-read">${readingTime(a.content)}</span>
+          ${(a.tags || []).length ? `<span class="meta-dot"></span>` : ''}
+          ${(a.tags || []).length
+            ? `<div class="tag-list" onclick="event.stopPropagation()">
+                 ${a.tags.slice(0, 1).map(t => `<span class="tag" onclick="go('/tag/${encodeURIComponent(t)}')">${esc(t)}</span>`).join('')}
+               </div>`
+            : ''}
+        </div>
       </div>
-    </article>`).join('');
+      ${thumb ? `<div class="card-thumb"><img src="${esc(thumb)}" alt="" loading="lazy"></div>` : ''}
+    </article>`;
+  }).join('');
 
   app.innerHTML = `<div class="page-home">${hero}<div class="article-list">${cards}</div></div>`;
 }
@@ -999,18 +1021,23 @@ async function viewArticle(id) {
 
       <article>
         <header class="art-header">
-          <h1 class="art-title">${esc(a.title)}</h1>
-          <div class="art-meta">
-            <time>${fmtDate(a.createdAt)}</time>
-            <span class="meta-dot"></span>
-            <span>${readingTime(a.content)}</span>
-            ${a.updatedAt !== a.createdAt
-              ? `<span class="meta-dot"></span><span>编辑于 ${fmtDate(a.updatedAt)}</span>` : ''}
+          <h1 class="art-title">${esc(a.title)}${a.visibility === 'private' ? lockBadge('private') : ''}</h1>
+          <div class="art-author-row">
+            <div class="art-author-avatar">${authorAvatarInner(a)}</div>
+            <div>
+              <div class="art-author-name">${esc(a.authorName || 'Author')}</div>
+              <div class="art-meta">
+                <time>${fmtDate(a.createdAt)}</time>
+                <span class="meta-dot"></span>
+                <span>${readingTime(a.content)}</span>
+                ${a.updatedAt !== a.createdAt
+                  ? `<span class="meta-dot"></span><span>编辑于 ${fmtDate(a.updatedAt)}</span>` : ''}
+              </div>
+            </div>
           </div>
           ${(a.tags || []).length
             ? `<div class="tag-list">${a.tags.map(t => `<span class="tag" onclick="go('/tag/${encodeURIComponent(t)}')">${esc(t)}</span>`).join('')}</div>`
             : ''}
-          ${a.visibility === 'private' ? lockBadge('private') : ''}
         </header>
         <div class="art-body">${a.content}</div>
       </article>
